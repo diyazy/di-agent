@@ -2,7 +2,7 @@
 
 **Context-Aware Agent for Decentralized Edge Orchestration**
 
-Implementation artifact for the dissertation *A Context-Aware Agentic Framework for Decentralized Edge Computing* (Tampere University, Diyaz Yakubov, supervised by David Hastbacka). Funded by Business Finland — Industry X and 6GSoft projects.
+Implementation artifact for the dissertation *A Context-Aware Agentic Framework for Decentralized Edge Computing* (Tampere University, Diyaz Yakubov, supervised by David Hastbacka and Sergio Moreschini). Funded by Business Finland — Industry X and 6GSoft projects.
 
 ---
 
