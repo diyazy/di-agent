@@ -1,0 +1,232 @@
+"""
+Proposition and construct calibration.
+
+For each of the 15 Di-Select propositions, we compute a PriorStrength λ ∈ [0,1]
+using the Spearman rank correlation between the source construct proxy score and
+the target construct proxy score across the 5 benchmarked distributions.
+
+Methodology
+-----------
+1. Assign each distribution a normalised score [0,1] on each construct,
+   derived from published empirical constants and computed CSV results.
+2. For each proposition (FromConstruct → ToConstruct, Positive|Negative):
+   - Compute Spearman ρ between from-scores and to-scores.
+   - λ = |ρ|  (strength only; direction is fixed by the proposition polarity).
+   - Clip to [0.30, 0.90] to avoid extreme cold-start weights.
+3. Return per-distribution construct scores and per-proposition λ values.
+
+Construct proxy variables
+-------------------------
+PS  – Performance & Scalability:  inverted pod-startup latency + throughput
+SC  – Security & Compliance:       CIS security score
+RR  – Reliability & Resilience:    inverted recovery time + offline preservation
+MU  – Maintainability & Usability: inverted setup time
+RC  – Resource Constraints & Cost: inverted energy_per_pod_j + inverted cp_overhead_w
+CO  – Connectivity & Offline:      offline_preservation + inverted cp_amplification
+CE  – Community & Ecosystem:       normalised GitHub stars
+"""
+
+from __future__ import annotations
+
+from scipy.stats import spearmanr
+
+from .constants import (
+    SECURITY_SCORES,
+    POD_STARTUP_LATENCY_MS,
+    DP_THROUGHPUT_OPS,
+    SETUP_TIME_HOURS,
+    RECOVERY_TIME_MIN,
+    OFFLINE_PRESERVATION,
+    GITHUB_STARS,
+)
+from .loaders import load_energy_efficiency, load_interrupt_amplification
+
+KDS = ["k3s", "k0s", "k8s", "kubeEdge", "openYurt"]
+
+# Propositions: (id, from, to, direction)
+PROPOSITIONS = [
+    ("P1",  "SC", "RC", "positive"),
+    ("P2",  "RC", "PS", "negative"),
+    ("P3",  "RC", "PS", "positive"),
+    ("P4",  "SC", "RR", "negative"),
+    ("P5",  "CO", "RR", "positive"),
+    ("P6",  "CO", "RR", "negative"),
+    ("P7",  "CE", "MU", "positive"),
+    ("P8",  "MU", "RC", "negative"),
+    ("P9",  "CE", "MU", "negative"),
+    ("P10", "PS", "RC", "negative"),
+    ("P11", "CE", "SC", "positive"),
+    ("P12", "SC", "MU", "negative"),
+    ("P13", "CO", "PS", "negative"),
+    ("P14", "RC", "SC", "negative"),
+    ("P15", "MU", "RR", "positive"),
+]
+
+
+def _norm_inv(vals: dict[str, float]) -> dict[str, float]:
+    """Normalise then invert: higher raw = lower score (e.g. latency → perf score)."""
+    lo, hi = min(vals.values()), max(vals.values())
+    span = hi - lo or 1.0
+    return {k: 1.0 - (v - lo) / span for k, v in vals.items()}
+
+
+def _norm(vals: dict[str, float]) -> dict[str, float]:
+    """Min-max normalise: higher raw = higher score."""
+    lo, hi = min(vals.values()), max(vals.values())
+    span = hi - lo or 1.0
+    return {k: (v - lo) / span for k, v in vals.items()}
+
+
+def _blend(a: dict[str, float], b: dict[str, float], w_a: float = 0.5) -> dict[str, float]:
+    """Weighted average of two normalised score dicts."""
+    return {k: w_a * a[k] + (1 - w_a) * b[k] for k in KDS}
+
+
+def _spearman_strength(x: list[float], y: list[float]) -> float:
+    """Return |Spearman ρ|, clipped to [0.30, 0.90]."""
+    rho, _ = spearmanr(x, y)
+    return float(max(0.30, min(0.90, abs(rho))))
+
+
+def compute_construct_scores(root_dir: str | None = None) -> dict[str, dict[str, float]]:
+    """
+    Returns {kd: {construct_id: score}} with all scores in [0, 1].
+    """
+    energy = load_energy_efficiency(root_dir)
+    irq    = load_interrupt_amplification(root_dir)
+
+    # ── PS: Performance & Scalability ─────────────────────────────────────
+    latency_inv = _norm_inv(POD_STARTUP_LATENCY_MS)
+    throughput_n = _norm(DP_THROUGHPUT_OPS)
+    ps = _blend(latency_inv, throughput_n, w_a=0.5)
+
+    # ── SC: Security & Compliance ─────────────────────────────────────────
+    sc = _norm(SECURITY_SCORES)
+
+    # ── RR: Reliability & Resilience ──────────────────────────────────────
+    recovery_inv = _norm_inv(RECOVERY_TIME_MIN)
+    offline_n    = _norm(OFFLINE_PRESERVATION)
+    rr = _blend(recovery_inv, offline_n, w_a=0.6)
+
+    # ── MU: Maintainability & Usability ───────────────────────────────────
+    mu = _norm_inv(SETUP_TIME_HOURS)
+
+    # ── RC: Resource Constraints & Cost ───────────────────────────────────
+    # energy_per_pod_j: lower = better resource efficiency
+    epod = {kd: energy[kd]["energy_per_pod_j"] or 15.0 for kd in KDS}
+    epod_inv = _norm_inv(epod)
+    # cp_overhead_w: lower = better
+    overhead = {kd: energy[kd]["cp_overhead_w"] or 0.35 for kd in KDS}
+    overhead_inv = _norm_inv(overhead)
+    rc = _blend(epod_inv, overhead_inv, w_a=0.6)
+
+    # ── CO: Connectivity & Offline Resilience ─────────────────────────────
+    # offline preservation + inverted interrupt amplification (lower amp = less overhead)
+    cp_amp = {kd: irq.get(kd, {}).get("cp_amplification", 2.0) for kd in KDS}
+    amp_inv = _norm_inv(cp_amp)
+    co = _blend(_norm(OFFLINE_PRESERVATION), amp_inv, w_a=0.7)
+
+    # ── CE: Community & Ecosystem ─────────────────────────────────────────
+    ce = _norm(GITHUB_STARS)
+
+    scores: dict[str, dict[str, float]] = {}
+    for kd in KDS:
+        scores[kd] = {
+            "PS": round(ps[kd], 4),
+            "SC": round(sc[kd], 4),
+            "RR": round(rr[kd], 4),
+            "MU": round(mu[kd], 4),
+            "RC": round(rc[kd], 4),
+            "CO": round(co[kd], 4),
+            "CE": round(ce[kd], 4),
+        }
+    return scores
+
+
+
+# Domain-knowledge overrides for propositions where the Spearman proxy is
+# known to be inadequate.  Format: {prop_id: (strength, reason)}.
+# These replace the proxy-computed λ but the Spearman statistics are still
+# reported for transparency.
+_OVERRIDES: dict[str, tuple[float, str]] = {
+    # P2 and P3 both map RC→PS with opposite polarities (known Di-Select conflict).
+    # The single Spearman ρ (+0.70) confirms P3 but inverts P2.  Both propositions
+    # capture real mechanisms (throughput overhead vs latency efficiency) that
+    # operate at different sub-dimensions of PS.  Assign equal strength so the
+    # agent balances both effects symmetrically at cold-start.
+    "P2":  (0.55, "P2/P3 conflict: RC→PS has opposing mechanisms (overhead vs efficiency). "
+                  "ρ=+0.70 confirms P3 direction. P2 assigned conservative λ=0.55 via "
+                  "domain knowledge; kubeEdge throughput penalty (75% lower than k8s) "
+                  "provides direct empirical support."),
+    # P1: SC→RC proxy is masked because k8s achieves high security AND high
+    # energy efficiency (10.18 J/pod, lowest of all KDs), defeating the expected
+    # positive correlation.  Domain knowledge from P2 (security overhead): k3s
+    # 7.21% security / lowest CPU; k8s 55% / highest baseline overhead.
+    "P1":  (0.62, "Proxy masked: k8s high SC + high energy efficiency overrides expected "
+                  "SC-overhead pattern. P2 paper evidence: security compliance positively "
+                  "correlates with setup/maintenance overhead (P12 ρ=-0.884 confirms). "
+                  "λ=0.62 from domain knowledge (security CIS overhead documented in P2)."),
+    # P5: RR proxy is recovery-time dominated; offline preservation (P5's mechanism)
+    # only contributes 40%.  k3s fast recovery dominates despite low CO score.
+    "P5":  (0.65, "RR proxy dominated by recovery-time metric where k3s/k0s excel. "
+                  "P5 specifically captures continuity DURING outage — a binary quality. "
+                  "kubeEdge/openYurt preserve messages during partition (P2 paper). "
+                  "λ=0.65 from domain knowledge; distinct from P6 (cloud-dependency penalty)."),
+    # P11: CE→SC near-zero proxy because kubeEdge/openYurt share k8s security score
+    # despite small community.  The mechanism (community patches → security) operates
+    # on a longer timescale than the benchmark window.
+    "P11": (0.48, "Near-zero proxy ρ because kubeEdge/openYurt reach same CIS score as k8s "
+                  "via different paths (custom hardening vs upstream patches). "
+                  "λ=0.48 from literature; community patch velocity well-documented but "
+                  "not observable in single benchmark snapshot."),
+}
+
+
+def compute_proposition_strengths(
+    construct_scores: dict[str, dict[str, float]]
+) -> dict[str, dict]:
+    """
+    Returns {prop_id: {prior_strength, direction, from_construct, to_construct,
+                        spearman_rho, calibration_note, method}}.
+
+    Method field: 'spearman' for proxy-based estimates, 'domain_override' for
+    propositions where proxy adequacy is insufficient.
+    """
+    results: dict[str, dict] = {}
+
+    for prop_id, from_c, to_c, direction in PROPOSITIONS:
+        x = [construct_scores[kd][from_c] for kd in KDS]
+        y = [construct_scores[kd][to_c]   for kd in KDS]
+
+        rho, pval = spearmanr(x, y)
+        proxy_strength = _spearman_strength(x, y)
+
+        sign_consistent = (direction == "positive" and rho > 0) or \
+                          (direction == "negative" and rho < 0)
+
+        if prop_id in _OVERRIDES:
+            strength, override_note = _OVERRIDES[prop_id]
+            method = "domain_override"
+            note = override_note
+        else:
+            strength = proxy_strength
+            method = "spearman"
+            note = (
+                f"|ρ|={proxy_strength:.3f} (p={pval:.3f}); "
+                f"direction {'confirmed' if sign_consistent else 'reversed — proxy limitation'}"
+            )
+
+        results[prop_id] = {
+            "prior_strength":    round(strength, 4),
+            "direction":         direction,
+            "from_construct":    from_c,
+            "to_construct":      to_c,
+            "spearman_rho":      round(float(rho), 4),
+            "p_value":           round(float(pval), 4),
+            "sign_consistent":   int(sign_consistent),
+            "n_distributions":   len(KDS),
+            "method":            method,
+            "calibration_note":  note,
+        }
+
+    return results
