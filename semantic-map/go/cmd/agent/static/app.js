@@ -1,0 +1,499 @@
+// Semantic-Map embedded UI controller.
+//
+// Vanilla JS, no framework. Cytoscape.js owns the graph state; the only
+// extra side-state is the currently selected edge (selectedEdge below) so
+// the side panel and modal know what they are mutating.
+//
+// Data flow:
+//   loadAll() → GET /graph + GET /history → render cy + cache state
+//   click edge → renderPanel(edge) + filter cached history client-side
+//   modal submit → POST → 204 → toast → loadAll() → cy redraws
+//
+// Endpoint contract is documented in di-agent/semantic-map/go/cmd/agent/dto.go
+// and the Phase 1 routes.go.
+
+(function () {
+  'use strict';
+
+  // ── Module state ────────────────────────────────────────────────────────
+
+  let cy = null;                  // cytoscape instance
+  let cachedGraph = null;         // last GET /graph payload
+  let cachedHistory = [];         // last GET /history payload
+  let selectedEdge = null;        // EdgeDTO currently shown in panel
+  let autoRefreshHandle = null;   // setInterval id when auto-refresh is on
+
+  // ── DOM refs ────────────────────────────────────────────────────────────
+
+  const $ = (id) => document.getElementById(id);
+  const els = {
+    healthDot:   $('health-dot'),
+    healthLabel: $('health-label'),
+    refreshBtn:  $('refresh-btn'),
+    autoRefresh: $('auto-refresh'),
+
+    panelEmpty: $('panel-empty'),
+    panelEdge:  $('panel-edge'),
+
+    edFrom:        $('ed-from'),
+    edTo:          $('ed-to'),
+    edPid:         $('ed-pid'),
+    edDir:         $('ed-dir'),
+    edPrior:       $('ed-prior'),
+    edEma:         $('ed-ema'),
+    edConf:        $('ed-conf'),
+    edNobs:        $('ed-nobs'),
+    edDeprecated:  $('ed-deprecated'),
+
+    historyList: $('history-list'),
+
+    btnStrength:  $('btn-strength'),
+    btnDeprecate: $('btn-deprecate'),
+    btnReset:     $('btn-reset'),
+
+    modal:         $('modal'),
+    modalForm:     $('modal-form'),
+    modalTitle:    $('modal-title'),
+    modalSubtitle: $('modal-subtitle'),
+    modalStrength: $('modal-strength-input'),
+    modalReason:   $('modal-reason-input'),
+    modalResetFrom:$('modal-reset-from'),
+    modalResetTo:  $('modal-reset-to'),
+    modalCancel:   $('modal-cancel'),
+    modalSubmit:   $('modal-submit'),
+
+    toasts: $('toasts'),
+  };
+
+  // ── HTTP helpers ────────────────────────────────────────────────────────
+
+  async function getJSON(path) {
+    const resp = await fetch(path, { headers: { 'Accept': 'application/json' } });
+    if (!resp.ok) {
+      let msg = `${path} → HTTP ${resp.status}`;
+      try { const er = await resp.json(); if (er && er.error) msg = er.error; } catch (_) {}
+      throw new Error(msg);
+    }
+    return resp.json();
+  }
+
+  async function postJSON(path, body) {
+    // The server's requireJSON guard rejects any POST without this header,
+    // so it must be set explicitly on every mutation call.
+    const resp = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (resp.status === 204) return null;
+    if (!resp.ok) {
+      let msg = `${path} → HTTP ${resp.status}`;
+      try { const er = await resp.json(); if (er && er.error) msg = er.error; } catch (_) {}
+      throw new Error(msg);
+    }
+    // 2xx with body — uncommon for our mutation endpoints but handled
+    // gracefully so future endpoints don't surprise us.
+    try { return await resp.json(); } catch (_) { return null; }
+  }
+
+  // ── Toasts ──────────────────────────────────────────────────────────────
+
+  function toast(message, kind) {
+    const node = document.createElement('div');
+    node.className = 'toast' + (kind === 'error' ? ' toast-error' : kind === 'success' ? ' toast-success' : '');
+    node.textContent = message;
+    els.toasts.appendChild(node);
+    // Defer adding the visible class so the transition runs.
+    requestAnimationFrame(() => node.classList.add('toast-visible'));
+    setTimeout(() => {
+      node.classList.remove('toast-visible');
+      setTimeout(() => node.remove(), 250);
+    }, 4000);
+  }
+
+  // ── Health polling (lightweight, used on Refresh) ───────────────────────
+
+  async function refreshHealth() {
+    try {
+      const h = await getJSON('/healthz');
+      if (h && h.ok) {
+        els.healthDot.className = 'health-dot health-ok';
+        els.healthLabel.textContent = 'healthy';
+      } else {
+        els.healthDot.className = 'health-dot health-bad';
+        els.healthLabel.textContent = 'unhealthy';
+      }
+    } catch (e) {
+      els.healthDot.className = 'health-dot health-bad';
+      els.healthLabel.textContent = 'unreachable';
+    }
+  }
+
+  // ── Cytoscape setup ─────────────────────────────────────────────────────
+
+  function cytoscapeStyle() {
+    return [
+      {
+        selector: 'node',
+        style: {
+          'background-color': '#3e4c59',
+          'label': 'data(label)',
+          'color': '#1f2933',
+          'text-valign': 'center',
+          'text-halign': 'center',
+          'text-margin-y': -22,
+          'font-size': 11,
+          'font-weight': 600,
+          'width': 38,
+          'height': 38,
+          'border-color': '#1f2933',
+          'border-width': 1,
+        },
+      },
+      {
+        // Edge styling per plan §"Cytoscape edge style":
+        //   - line-color green for "+", red for "-"
+        //   - opacity 0.3 + 0.7 * confidence
+        //   - line-style dashed if deprecated
+        //   - target-arrow-shape triangle
+        selector: 'edge',
+        style: {
+          'curve-style': 'bezier',
+          'control-point-step-size': 60,
+          'line-color': 'mapData(directionNum, 0, 1, #2eb872, #e63946)',
+          'target-arrow-color': 'mapData(directionNum, 0, 1, #2eb872, #e63946)',
+          'target-arrow-shape': 'triangle',
+          'arrow-scale': 1.1,
+          'width': 2.5,
+          'opacity': 'data(opacity)',
+          'line-style': 'data(lineStyle)',
+          'label': 'data(label)',
+          'font-size': 9,
+          'color': '#52606d',
+          'text-background-color': '#ffffff',
+          'text-background-opacity': 0.85,
+          'text-background-padding': 2,
+          'text-rotation': 'autorotate',
+        },
+      },
+      {
+        selector: 'edge:selected',
+        style: {
+          'width': 4.5,
+          'opacity': 1.0,
+          'overlay-color': '#1f2933',
+          'overlay-opacity': 0.08,
+          'overlay-padding': 4,
+        },
+      },
+    ];
+  }
+
+  function buildElements(graph) {
+    const elements = [];
+    for (const c of graph.constructs || []) {
+      elements.push({
+        group: 'nodes',
+        data: { id: c.construct_id, label: c.construct_id, name: c.name, description: c.description },
+      });
+    }
+    for (const e of graph.edges || []) {
+      const opacity = Math.max(0.1, Math.min(1.0, 0.3 + 0.7 * (e.confidence ?? 0)));
+      // Match the edge to its proposition to know if it is deprecated.
+      const prop = (graph.propositions || []).find((p) => p.proposition_id === e.proposition_id);
+      const deprecated = !!(prop && prop.deprecated);
+      elements.push({
+        group: 'edges',
+        // Cytoscape requires unique edge ids. Propositions are unique per
+        // edge in the v1 ontology, so we use the proposition_id directly.
+        data: {
+          id: e.proposition_id,
+          source: e.from,
+          target: e.to,
+          label: e.proposition_id,
+          edge: e,
+          deprecated: deprecated,
+          directionNum: e.direction === '-' ? 1 : 0,
+          opacity: opacity,
+          lineStyle: deprecated ? 'dashed' : 'solid',
+        },
+      });
+    }
+    return elements;
+  }
+
+  function renderGraph(graph) {
+    if (cy) {
+      cy.elements().remove();
+      cy.add(buildElements(graph));
+      cy.layout({ name: 'cose', animate: false, padding: 30 }).run();
+    } else {
+      cy = cytoscape({
+        container: document.getElementById('cy'),
+        elements: buildElements(graph),
+        style: cytoscapeStyle(),
+        layout: {
+          name: 'cose',
+          animate: false,
+          padding: 30,
+          nodeRepulsion: 8000,
+          idealEdgeLength: 110,
+          edgeElasticity: 100,
+        },
+        wheelSensitivity: 0.25,
+        minZoom: 0.4,
+        maxZoom: 2.5,
+      });
+
+      cy.on('tap', 'edge', (evt) => {
+        const edge = evt.target.data('edge');
+        if (!edge) return;
+        selectEdge(edge);
+      });
+
+      cy.on('tap', (evt) => {
+        // Tap on background → clear selection.
+        if (evt.target === cy) {
+          selectedEdge = null;
+          els.panelEdge.classList.add('hidden');
+          els.panelEmpty.classList.remove('hidden');
+        }
+      });
+    }
+  }
+
+  // ── Side panel rendering ────────────────────────────────────────────────
+
+  function fmtFloat(v, digits) {
+    if (v === null || v === undefined || Number.isNaN(v)) return '—';
+    return Number(v).toFixed(digits ?? 3);
+  }
+
+  function selectEdge(edge) {
+    selectedEdge = edge;
+    els.panelEmpty.classList.add('hidden');
+    els.panelEdge.classList.remove('hidden');
+
+    els.edFrom.textContent = edge.from;
+    els.edTo.textContent   = edge.to;
+    els.edPid.textContent  = edge.proposition_id;
+    els.edDir.textContent  = edge.direction;
+    els.edDir.className    = edge.direction === '-' ? 'dir-neg' : 'dir-pos';
+    els.edPrior.textContent = fmtFloat(edge.prior_weight);
+    els.edEma.textContent   = fmtFloat(edge.ema_weight);
+    els.edConf.textContent  = fmtFloat(edge.confidence);
+    els.edNobs.textContent  = edge.n_observations ?? 0;
+
+    const prop = cachedGraph && cachedGraph.propositions
+      ? cachedGraph.propositions.find((p) => p.proposition_id === edge.proposition_id)
+      : null;
+    if (prop && prop.deprecated) {
+      els.edDeprecated.textContent = `yes — ${prop.deprecated_reason || '(no reason)'}`;
+      els.edDeprecated.className = 'flag-deprecated';
+    } else {
+      els.edDeprecated.textContent = 'no';
+      els.edDeprecated.className = 'flag-active';
+    }
+
+    renderHistory(edge.proposition_id);
+  }
+
+  function renderHistory(propositionID) {
+    // Per plan §"Mutation flow" step 1: filter the cached /history payload
+    // client-side for entries whose target_id matches this proposition.
+    const matches = cachedHistory
+      .filter((h) => h && h.target_id === propositionID)
+      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+      .slice(0, 5);
+
+    if (matches.length === 0) {
+      els.historyList.innerHTML = '<li class="hint small">No history yet for this proposition.</li>';
+      return;
+    }
+
+    els.historyList.innerHTML = '';
+    for (const ev of matches) {
+      const li = document.createElement('li');
+      const ts = ev.timestamp ? new Date(ev.timestamp).toISOString().replace('T', ' ').slice(0, 19) : '—';
+      const detail = ev.detail ? JSON.stringify(ev.detail) : '';
+      li.innerHTML =
+        `<span class="history-kind">${escapeHTML(ev.kind || '?')}</span>` +
+        `<span class="history-ts">${escapeHTML(ts)}</span>` +
+        (detail ? `<br/><span>${escapeHTML(detail)}</span>` : '');
+      els.historyList.appendChild(li);
+    }
+  }
+
+  function escapeHTML(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    })[c]);
+  }
+
+  // ── Modal ───────────────────────────────────────────────────────────────
+
+  function openModal(kind, edge) {
+    if (!edge) {
+      toast('Select an edge first', 'error');
+      return;
+    }
+
+    // Reset class + populate fields based on action kind.
+    els.modal.className = '';
+    els.modal.classList.add('modal-' + kind);
+
+    if (kind === 'strength') {
+      els.modalTitle.textContent = 'Set proposition strength';
+      els.modalSubtitle.textContent = `${edge.proposition_id}: ${edge.from} → ${edge.to}`;
+      els.modalStrength.value = (edge.prior_weight ?? 0.5).toFixed(2);
+    } else if (kind === 'deprecate') {
+      els.modalTitle.textContent = 'Deprecate proposition';
+      els.modalSubtitle.textContent = `${edge.proposition_id}: ${edge.from} → ${edge.to}`;
+      els.modalReason.value = '';
+    } else if (kind === 'reset') {
+      els.modalTitle.textContent = 'Reset edge EMA';
+      els.modalSubtitle.textContent = `${edge.proposition_id}`;
+      els.modalResetFrom.textContent = edge.from;
+      els.modalResetTo.textContent = edge.to;
+    }
+
+    // Rebind submit handler for this specific (kind, edge) pair. We replace
+    // the entire onsubmit so prior handlers can't fire against a stale edge.
+    els.modalForm.onsubmit = (ev) => {
+      ev.preventDefault();
+      submitModal(kind, edge).catch((err) => toast(err.message || String(err), 'error'));
+    };
+
+    if (typeof els.modal.showModal === 'function') {
+      els.modal.showModal();
+    } else {
+      // Extremely unlikely fallback for browsers without <dialog>.
+      els.modal.setAttribute('open', '');
+    }
+  }
+
+  function closeModal() {
+    if (typeof els.modal.close === 'function') {
+      els.modal.close();
+    } else {
+      els.modal.removeAttribute('open');
+    }
+  }
+
+  async function submitModal(kind, edge) {
+    if (kind === 'strength') {
+      const v = parseFloat(els.modalStrength.value);
+      if (Number.isNaN(v) || v < 0 || v > 1) {
+        toast('Strength must be a number in [0.0, 1.0]', 'error');
+        return;
+      }
+      await postJSON('/ontology/strength', {
+        proposition_id: edge.proposition_id,
+        strength: v,
+      });
+      closeModal();
+      toast(`${edge.proposition_id} strength set to ${v.toFixed(2)}`, 'success');
+    } else if (kind === 'deprecate') {
+      const reason = (els.modalReason.value || '').trim();
+      if (!reason) {
+        toast('Please provide a reason', 'error');
+        return;
+      }
+      await postJSON('/ontology/deprecate', {
+        proposition_id: edge.proposition_id,
+        reason: reason,
+      });
+      closeModal();
+      toast(`${edge.proposition_id} deprecated`, 'success');
+    } else if (kind === 'reset') {
+      await postJSON('/agent/reset', {
+        from: edge.from,
+        to: edge.to,
+      });
+      closeModal();
+      toast(`Edge ${edge.from} → ${edge.to} reset`, 'success');
+    }
+
+    await loadAll();
+    // If the selected edge still exists, re-select it so the panel reflects
+    // the new state (e.g. updated EMA weight, deprecated flag).
+    if (cachedGraph && selectedEdge) {
+      const fresh = (cachedGraph.edges || []).find(
+        (e) => e.proposition_id === selectedEdge.proposition_id
+      );
+      if (fresh) selectEdge(fresh);
+    }
+  }
+
+  // ── Data load ───────────────────────────────────────────────────────────
+
+  async function loadAll() {
+    try {
+      const [graph, history] = await Promise.all([
+        getJSON('/graph'),
+        getJSON('/history'),
+      ]);
+      cachedGraph = graph;
+      cachedHistory = Array.isArray(history) ? history : [];
+      renderGraph(graph);
+      if (selectedEdge) {
+        const fresh = (graph.edges || []).find(
+          (e) => e.proposition_id === selectedEdge.proposition_id
+        );
+        if (fresh) {
+          selectEdge(fresh);
+        } else {
+          selectedEdge = null;
+          els.panelEdge.classList.add('hidden');
+          els.panelEmpty.classList.remove('hidden');
+        }
+      }
+      await refreshHealth();
+    } catch (err) {
+      toast(err.message || String(err), 'error');
+      els.healthDot.className = 'health-dot health-bad';
+      els.healthLabel.textContent = 'error';
+    }
+  }
+
+  // ── Auto-refresh toggle ─────────────────────────────────────────────────
+
+  function setAutoRefresh(enabled) {
+    if (autoRefreshHandle) {
+      clearInterval(autoRefreshHandle);
+      autoRefreshHandle = null;
+    }
+    if (enabled) {
+      autoRefreshHandle = setInterval(loadAll, 5000);
+    }
+  }
+
+  // ── Wire up event listeners ─────────────────────────────────────────────
+
+  function wire() {
+    els.refreshBtn.addEventListener('click', () => loadAll());
+    els.autoRefresh.addEventListener('change', (e) => setAutoRefresh(e.target.checked));
+
+    els.btnStrength.addEventListener('click',  () => openModal('strength',  selectedEdge));
+    els.btnDeprecate.addEventListener('click', () => openModal('deprecate', selectedEdge));
+    els.btnReset.addEventListener('click',     () => openModal('reset',     selectedEdge));
+
+    els.modalCancel.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      closeModal();
+    });
+
+    // ESC inside <dialog> fires a "cancel" event, then closes. Nothing to do.
+  }
+
+  // ── Bootstrap ───────────────────────────────────────────────────────────
+
+  document.addEventListener('DOMContentLoaded', () => {
+    if (typeof cytoscape !== 'function') {
+      toast('Failed to load Cytoscape from CDN', 'error');
+      return;
+    }
+    wire();
+    loadAll();
+  });
+})();
