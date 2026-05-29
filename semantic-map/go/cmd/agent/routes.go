@@ -5,7 +5,9 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"runtime"
 	"strings"
+	"time"
 
 	"github.com/DiyazY/di-agent/pkg/semmap"
 	"github.com/DiyazY/di-agent/pkg/types"
@@ -22,6 +24,7 @@ import (
 // handler calls requireJSON at the top as a lightweight CSRF mitigation.
 func registerRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 	registerExistingRoutes(mux, sm)
+	registerReadRoutes(mux, sm)
 }
 
 // registerExistingRoutes preserves the original five endpoints unchanged.
@@ -123,6 +126,184 @@ func writeError(w http.ResponseWriter, code int, msg string) {
 	if err := json.NewEncoder(w).Encode(ErrorResponse{Error: msg}); err != nil {
 		log.Printf("writeError encoding failure: %v", err)
 	}
+}
+
+// registerReadRoutes wires the introspection endpoints: /graph, /edges,
+// /constructs, /propositions, /history, /neighbors, /healthz, /version.
+// These read-only endpoints never mutate state and emit JSON on both
+// success and error paths.
+func registerReadRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
+	mux.HandleFunc("GET /graph", func(w http.ResponseWriter, r *http.Request) {
+		constructs, err := sm.Constructs()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		propositions, err := sm.Propositions()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		edges, err := sm.AllEdges()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		snap := GraphSnapshot{
+			Constructs:   make([]ConstructDTO, 0, len(constructs)),
+			Propositions: make([]PropositionDTO, 0, len(propositions)),
+			Edges:        make([]EdgeDTO, 0, len(edges)),
+		}
+		for _, c := range constructs {
+			snap.Constructs = append(snap.Constructs, constructToDTO(c))
+		}
+		for _, p := range propositions {
+			snap.Propositions = append(snap.Propositions, propositionToDTO(p))
+		}
+		for _, e := range edges {
+			snap.Edges = append(snap.Edges, edgeToDTO(e))
+		}
+		writeJSON(w, snap)
+	})
+
+	mux.HandleFunc("GET /edges", func(w http.ResponseWriter, r *http.Request) {
+		from := r.URL.Query().Get("from")
+		to := r.URL.Query().Get("to")
+		var (
+			edges []*types.EdgeDescriptor
+			err   error
+		)
+		switch {
+		case from != "" && to != "":
+			edges, err = sm.EdgesByPair(from, to)
+		default:
+			// Empty filter on either side -> return all and filter in-process
+			// for the half-specified case. AllEdges is the common path.
+			edges, err = sm.AllEdges()
+			if err == nil && (from != "" || to != "") {
+				filtered := edges[:0]
+				for _, e := range edges {
+					if from != "" && e.FromID != from {
+						continue
+					}
+					if to != "" && e.ToID != to {
+						continue
+					}
+					filtered = append(filtered, e)
+				}
+				edges = filtered
+			}
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		out := make([]EdgeDTO, 0, len(edges))
+		for _, e := range edges {
+			out = append(out, edgeToDTO(e))
+		}
+		writeJSON(w, out)
+	})
+
+	mux.HandleFunc("GET /constructs", func(w http.ResponseWriter, r *http.Request) {
+		constructs, err := sm.Constructs()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		out := make([]ConstructDTO, 0, len(constructs))
+		for _, c := range constructs {
+			out = append(out, constructToDTO(c))
+		}
+		writeJSON(w, out)
+	})
+
+	mux.HandleFunc("GET /propositions", func(w http.ResponseWriter, r *http.Request) {
+		propositions, err := sm.Propositions()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		out := make([]PropositionDTO, 0, len(propositions))
+		for _, p := range propositions {
+			out = append(out, propositionToDTO(p))
+		}
+		writeJSON(w, out)
+	})
+
+	mux.HandleFunc("GET /history", func(w http.ResponseWriter, r *http.Request) {
+		since, err := parseSince(r.URL.Query().Get("since"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		events, err := sm.History(since)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		out := make([]OntologyEventDTO, 0, len(events))
+		for _, e := range events {
+			out = append(out, eventToDTO(e))
+		}
+		writeJSON(w, out)
+	})
+
+	mux.HandleFunc("GET /neighbors", func(w http.ResponseWriter, r *http.Request) {
+		node := r.URL.Query().Get("node")
+		if node == "" {
+			writeError(w, http.StatusBadRequest, "missing required query parameter: node")
+			return
+		}
+		neighbors, err := sm.Neighbors(node)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if neighbors == nil {
+			neighbors = []string{}
+		}
+		writeJSON(w, neighbors)
+	})
+
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, HealthResponse{OK: true})
+	})
+
+	mux.HandleFunc("GET /version", func(w http.ResponseWriter, r *http.Request) {
+		// Count constructs/propositions for operator visibility. Errors here
+		// shouldn't fail /version — fall back to zero counts.
+		var nC, nP int
+		if cs, err := sm.Constructs(); err == nil {
+			nC = len(cs)
+		}
+		if ps, err := sm.Propositions(); err == nil {
+			nP = len(ps)
+		}
+		writeJSON(w, VersionResponse{
+			AgentVersion:       Version,
+			GoVersion:          runtime.Version(),
+			BuildCommit:        BuildCommit,
+			SemmapConstructs:   nC,
+			SemmapPropositions: nP,
+		})
+	})
+}
+
+// parseSince accepts an empty string (returns zero time), an RFC3339
+// timestamp, or a Go duration (subtracted from time.Now). It is the shared
+// parser for the ?since= query parameter on /history.
+func parseSince(s string) (time.Time, error) {
+	if s == "" {
+		return time.Time{}, nil
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	if d, err := time.ParseDuration(s); err == nil {
+		return time.Now().Add(-d), nil
+	}
+	return time.Time{}, errors.New("since must be RFC3339 timestamp or Go duration (e.g. 1h, 30m)")
 }
 
 // requireJSON returns an error when the request's Content-Type is not
