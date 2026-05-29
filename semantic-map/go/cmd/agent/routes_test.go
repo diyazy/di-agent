@@ -230,3 +230,223 @@ func body(resp *http.Response) string {
 	resp.Body.Close()
 	return fmt.Sprintf("status=%d body=%s", resp.StatusCode, string(b))
 }
+
+// ── Mutation tests ───────────────────────────────────────────────────────────
+
+func TestSetStrength_UpdatesAndAppearsInHistory(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	resp := postJSON(t, base+"/ontology/strength", SetStrengthRequest{
+		PropositionID: "P1",
+		Strength:      0.95,
+	})
+	if resp.StatusCode != 204 {
+		t.Fatalf("set strength: %s", body(resp))
+	}
+	resp.Body.Close()
+
+	var props []PropositionDTO
+	getJSON(t, base+"/propositions", &props)
+	for _, p := range props {
+		if p.PropositionID == "P1" {
+			if p.PriorStrength != 0.95 {
+				t.Errorf("P1 strength after set: got %.3f, want 0.95", p.PriorStrength)
+			}
+		}
+	}
+
+	var events []OntologyEventDTO
+	getJSON(t, base+"/history", &events)
+	if len(events) != 1 {
+		t.Fatalf("history: got %d events, want 1", len(events))
+	}
+	if events[0].Kind != "proposition_strength_set" {
+		t.Errorf("event kind: got %q, want proposition_strength_set", events[0].Kind)
+	}
+	if events[0].TargetID != "P1" {
+		t.Errorf("event target: got %q, want P1", events[0].TargetID)
+	}
+}
+
+func TestDeprecate_FlagsPropositionAndReasonerSkipsIt(t *testing.T) {
+	base, sm, cleanup := newTestAgent(t)
+	defer cleanup()
+
+	before, err := sm.CostOfAction("pod-scheduling", "node_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp := postJSON(t, base+"/ontology/deprecate", DeprecateRequest{
+		PropositionID: "P1",
+		Reason:        "http test",
+	})
+	if resp.StatusCode != 204 {
+		t.Fatalf("deprecate: %s", body(resp))
+	}
+	resp.Body.Close()
+
+	var props []PropositionDTO
+	getJSON(t, base+"/propositions", &props)
+	var p1 *PropositionDTO
+	for i := range props {
+		if props[i].PropositionID == "P1" {
+			p1 = &props[i]
+		}
+	}
+	if p1 == nil {
+		t.Fatal("P1 disappeared from /propositions after deprecate (must be soft-delete)")
+	}
+	if !p1.Deprecated {
+		t.Error("P1 not flagged deprecated after POST /ontology/deprecate")
+	}
+	if p1.DeprecatedReason != "http test" {
+		t.Errorf("P1 deprecated_reason: got %q, want \"http test\"", p1.DeprecatedReason)
+	}
+
+	after, err := sm.CostOfAction("pod-scheduling", "node_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.GraphPathUsed) != len(before.GraphPathUsed)-1 {
+		t.Errorf("graph path should shrink by 1 after deprecate; got %d → %d",
+			len(before.GraphPathUsed), len(after.GraphPathUsed))
+	}
+}
+
+func TestAddConstruct_AppearsInConstructs(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	resp := postJSON(t, base+"/ontology/construct", AddConstructRequest{
+		ConstructID: "PR",
+		Name:        "Privacy & Data Sovereignty",
+		Description: "added by http test",
+	})
+	if resp.StatusCode != 204 {
+		t.Fatalf("add construct: %s", body(resp))
+	}
+	resp.Body.Close()
+
+	var constructs []ConstructDTO
+	getJSON(t, base+"/constructs", &constructs)
+	found := false
+	for _, c := range constructs {
+		if c.ConstructID == "PR" {
+			found = true
+			if c.Name != "Privacy & Data Sovereignty" {
+				t.Errorf("PR name: got %q", c.Name)
+			}
+		}
+	}
+	if !found {
+		t.Error("PR construct not found after POST /ontology/construct")
+	}
+}
+
+func TestAddValidatedProposition_AppearsInPropositions(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	// PS→SC is not in the Di-Select bootstrap; safe to add.
+	resp := postJSON(t, base+"/ontology/proposition", AddPropositionRequest{
+		PropositionID: "P-http",
+		From:          "PS",
+		To:            "SC",
+		Direction:     "+",
+		PriorStrength: 0.42,
+	})
+	if resp.StatusCode != 204 {
+		t.Fatalf("add proposition: %s", body(resp))
+	}
+	resp.Body.Close()
+
+	var props []PropositionDTO
+	getJSON(t, base+"/propositions", &props)
+	for _, p := range props {
+		if p.PropositionID == "P-http" {
+			if p.FromConstruct != "PS" || p.ToConstruct != "SC" {
+				t.Errorf("P-http endpoints: from=%s to=%s", p.FromConstruct, p.ToConstruct)
+			}
+			if p.Direction != "+" {
+				t.Errorf("P-http direction: got %q, want +", p.Direction)
+			}
+			return
+		}
+	}
+	t.Error("P-http proposition not found after POST /ontology/proposition")
+}
+
+func TestResetEdge_RestoresPriorAfterUpdates(t *testing.T) {
+	base, sm, cleanup := newTestAgent(t)
+	defer cleanup()
+
+	// Stream a few observations into PS→RC to move EMA off prior.
+	for i := 0; i < 50; i++ {
+		if err := sm.Ingest("PS", "RC", 0.9, fmt.Sprintf("evt-%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Reset via HTTP.
+	resp := postJSON(t, base+"/agent/reset", ResetRequest{From: "PS", To: "RC"})
+	if resp.StatusCode != 204 {
+		t.Fatalf("reset: %s", body(resp))
+	}
+	resp.Body.Close()
+
+	var edges []EdgeDTO
+	getJSON(t, base+"/edges?from=PS&to=RC", &edges)
+	if len(edges) == 0 {
+		t.Fatal("no PS→RC edges returned after reset")
+	}
+	for _, e := range edges {
+		if e.EMAWeight != e.PriorWeight {
+			t.Errorf("edge %s: EMA=%.3f != prior=%.3f after reset", e.PropositionID, e.EMAWeight, e.PriorWeight)
+		}
+		if e.NObservations != 0 {
+			t.Errorf("edge %s: n_observations=%d after reset; want 0", e.PropositionID, e.NObservations)
+		}
+		if e.Confidence != 0.0 {
+			t.Errorf("edge %s: confidence=%.3f after reset; want 0.0", e.PropositionID, e.Confidence)
+		}
+	}
+}
+
+func TestPostWithoutJSONContentType_Returns400(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	resp := postRaw(t, base+"/ontology/strength", `{"proposition_id":"P1","strength":0.5}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Errorf("missing Content-Type: got %d, want 400", resp.StatusCode)
+	}
+	var er ErrorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&er); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if !strings.Contains(er.Error, "application/json") {
+		t.Errorf("error message %q should mention application/json", er.Error)
+	}
+}
+
+func TestSetStrength_UnknownProposition_Returns500WithErrorJSON(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	resp := postJSON(t, base+"/ontology/strength", SetStrengthRequest{
+		PropositionID: "P-nonexistent",
+		Strength:      0.5,
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != 500 {
+		t.Errorf("unknown prop: got %d, want 500", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("error Content-Type: got %q, want application/json", ct)
+	}
+	var er ErrorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&er); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if er.Error == "" {
+		t.Error("error body empty")
+	}
+}
