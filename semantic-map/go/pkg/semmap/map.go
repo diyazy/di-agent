@@ -3,6 +3,8 @@
 package semmap
 
 import (
+	"time"
+
 	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
@@ -67,4 +69,74 @@ func (m *SemanticMap) RejectCandidate(candidateID string) error {
 
 func (m *SemanticMap) DeferCandidate(candidateID string) error {
 	return m.proposer.Defer(candidateID)
+}
+
+// ── Read-side facade (introspection) ──────────────────────────────────────────
+//
+// These pass-throughs expose graph state to transports (HTTP, CLI, UI). They
+// intentionally live on the facade — many small methods over one mega-Snapshot
+// — so the package stays transport-agnostic and easy to consume.
+
+// Constructs returns every construct currently registered in the ontology.
+func (m *SemanticMap) Constructs() ([]*types.Construct, error) {
+	return m.ontology.Constructs()
+}
+
+// Propositions returns every proposition (including deprecated ones, flagged
+// via Proposition.Deprecated).
+func (m *SemanticMap) Propositions() ([]*types.Proposition, error) {
+	return m.ontology.Propositions()
+}
+
+// AllEdges returns every edge descriptor currently held in storage.
+func (m *SemanticMap) AllEdges() ([]*types.EdgeDescriptor, error) {
+	return m.storage.AllEdges()
+}
+
+// EdgesByPair returns every edge between (from, to). Conflict-pair endpoints
+// (e.g. RC→PS for P2/P3) yield more than one descriptor.
+func (m *SemanticMap) EdgesByPair(from, to string) ([]*types.EdgeDescriptor, error) {
+	return m.storage.GetEdgesByPair(from, to)
+}
+
+// Neighbors returns the set of construct IDs reachable from nodeID via one
+// outgoing edge.
+func (m *SemanticMap) Neighbors(nodeID string) ([]string, error) {
+	return m.storage.Neighbors(nodeID)
+}
+
+// History returns ontology mutation events appended at or after `since`.
+// Pass the zero time.Time to retrieve the full audit log.
+func (m *SemanticMap) History(since time.Time) ([]*types.OntologyEvent, error) {
+	return m.ontology.GetHistory(since)
+}
+
+// ── Write-side facade (ontology mutations) ────────────────────────────────────
+
+// SetPropositionStrength recalibrates the prior strength of an existing
+// proposition and appends an event to the audit log.
+func (m *SemanticMap) SetPropositionStrength(id string, strength float64) error {
+	return m.ontology.SetPropositionStrength(id, strength)
+}
+
+// Deprecate marks a proposition as no-longer-endorsed (soft delete).
+// Reasoners must skip deprecated propositions during cost computation.
+func (m *SemanticMap) Deprecate(id, reason string) error {
+	return m.ontology.Deprecate(id, reason)
+}
+
+// AddConstruct appends a new construct to the ontology.
+func (m *SemanticMap) AddConstruct(c *types.Construct) error {
+	return m.ontology.AddConstruct(c)
+}
+
+// AddValidatedProposition appends a new proposition after the ontology has
+// validated it against the existing backbone.
+func (m *SemanticMap) AddValidatedProposition(p *types.Proposition) error {
+	return m.ontology.AddValidatedProposition(p)
+}
+
+// ResetEdge restores every edge between (from, to) to its prior state.
+func (m *SemanticMap) ResetEdge(from, to string) error {
+	return m.updater.Reset(from, to)
 }
