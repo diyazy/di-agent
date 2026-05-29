@@ -428,6 +428,45 @@ func TestPostWithoutJSONContentType_Returns400(t *testing.T) {
 	}
 }
 
+func TestStaticUI_ServesPlaceholder(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	resp, err := http.Get(base + "/ui/placeholder.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("placeholder: status %d", resp.StatusCode)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(b), "replaced in Phase 2B") {
+		t.Errorf("placeholder body should contain marker; got %q", string(b))
+	}
+}
+
+func TestStaticUI_RootRedirectsToIndex(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	// Disable auto-follow so we can observe the redirect.
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := client.Get(base + "/ui/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 302 {
+		t.Errorf("/ui/: status %d, want 302", resp.StatusCode)
+	}
+	if loc := resp.Header.Get("Location"); loc != "/ui/index.html" {
+		t.Errorf("Location header: got %q, want /ui/index.html", loc)
+	}
+}
+
 func TestSetStrength_UnknownProposition_Returns500WithErrorJSON(t *testing.T) {
 	base, _, cleanup := newTestAgent(t)
 	defer cleanup()
