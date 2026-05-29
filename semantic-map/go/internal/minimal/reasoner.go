@@ -32,35 +32,40 @@ func NewRuleEngineReasoner(
 	return &RuleEngineReasoner{storage, ontology, minTrustScore}
 }
 
+// CostOfAction walks every edge in storage and accumulates the contribution
+// of each to the agent's cost estimate. Iterating edges (not propositions) is
+// the multigraph-correct read path: conflict pairs (e.g. P2 negative and P3
+// positive on RC→PS) contribute independently with their own EMA-tracked
+// magnitudes and proposition-fixed signs. The earlier proposition-driven
+// implementation called GetEdge(p.From, p.To) per proposition and conflated
+// conflict pairs onto a single descriptor.
 func (r *RuleEngineReasoner) CostOfAction(taskType, nodeID string) (*types.ActionCost, error) {
-	props, err := r.ontology.Propositions()
+	edges, err := r.storage.AllEdges()
 	if err != nil {
 		return nil, err
 	}
 
 	var cpuCost, energyCost, latency float64
-	var confidence float64
+	var confidenceSum float64
 	var path []string
 
-	for _, p := range props {
-		edge, err := r.storage.GetEdge(p.FromConstruct, p.ToConstruct)
-		if err != nil || edge == nil {
-			continue
-		}
-		effective := blend(edge)
-		path = append(path, fmt.Sprintf("%s→%s(%.2f)", p.FromConstruct, p.ToConstruct, effective))
-		confidence += edge.Confidence
+	for _, e := range edges {
+		effective := blend(e)
+		path = append(path, fmt.Sprintf("%s→%s[%s](%.2f)",
+			e.FromID, e.ToID, e.PropositionID, effective))
+		confidenceSum += e.Confidence
 
-		switch p.ToConstruct {
+		switch e.ToID {
 		case "RC":
-			energyCost += effective * sign(p.Direction)
+			energyCost += effective * sign(e.Direction)
 		case "PS":
-			latency += effective * sign(p.Direction)
+			latency += effective * sign(e.Direction)
 		}
 	}
 
-	if len(props) > 0 {
-		confidence /= float64(len(props))
+	var confidence float64
+	if len(edges) > 0 {
+		confidence = confidenceSum / float64(len(edges))
 	}
 	cpuCost = latency * 0.1 // lightweight proxy; replaced by P4 prior initialization
 

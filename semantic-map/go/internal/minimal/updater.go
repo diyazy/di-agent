@@ -32,6 +32,7 @@ type EMAUpdater struct {
 
 type storageWriter interface {
 	GetEdge(fromID, toID string) (*types.EdgeDescriptor, error)
+	GetEdgesByPair(fromID, toID string) ([]*types.EdgeDescriptor, error)
 	PutEdge(d *types.EdgeDescriptor) error
 	GetNode(nodeID string) (*types.NodeDescriptor, error)
 	PutNode(d *types.NodeDescriptor) error
@@ -49,33 +50,49 @@ func NewEMAUpdater(storage storageWriter, alpha, convergenceThreshold float64) *
 	}
 }
 
+// UpdateEdge incorporates one telemetry observation into every edge between
+// (fromID, toID). For conflict-pair propositions this means both halves of
+// the pair receive the same observation but maintain independent EMAs — they
+// diverge over time as evidence accumulates and the dominant mechanism in
+// THIS deployment wins.
+//
+// Idempotency is per-edge: the seen-set key is (fromID, toID, propositionID,
+// eventID), so replaying the same observation leaves every affected edge
+// unchanged.
+//
+// Returns the canonical edge for (fromID, toID) after updating — the entry
+// with the lexicographically smallest PropositionID, matching GetEdge's
+// convention. Callers needing all updated edges should call GetEdgesByPair.
 func (u *EMAUpdater) UpdateEdge(fromID, toID string, obs float64, eventID string) (*types.EdgeDescriptor, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
-	key := fmt.Sprintf("%s→%s:%s", fromID, toID, eventID)
-	if _, ok := u.seen[key]; ok {
-		return u.storage.GetEdge(fromID, toID) // idempotent: return unchanged state
-	}
-
-	edge, err := u.storage.GetEdge(fromID, toID)
+	edges, err := u.storage.GetEdgesByPair(fromID, toID)
 	if err != nil {
 		return nil, err
 	}
-	if edge == nil {
+	if len(edges) == 0 {
 		return nil, fmt.Errorf("edge %s→%s not found in storage", fromID, toID)
 	}
 
-	updated := *edge
-	updated.EMAWeight = u.alpha*obs + (1-u.alpha)*edge.EMAWeight
-	updated.NObservations = edge.NObservations + 1
-	updated.Confidence = math.Min(float64(updated.NObservations)/u.convergenceThreshold, 1.0)
+	for _, edge := range edges {
+		key := fmt.Sprintf("%s→%s:%s:%s", fromID, toID, edge.PropositionID, eventID)
+		if _, ok := u.seen[key]; ok {
+			continue // this (edge, event) already applied
+		}
+		updated := *edge
+		updated.EMAWeight = u.alpha*obs + (1-u.alpha)*edge.EMAWeight
+		updated.NObservations = edge.NObservations + 1
+		updated.Confidence = math.Min(float64(updated.NObservations)/u.convergenceThreshold, 1.0)
 
-	if err := u.storage.PutEdge(&updated); err != nil {
-		return nil, err
+		if err := u.storage.PutEdge(&updated); err != nil {
+			return nil, err
+		}
+		u.seen[key] = struct{}{}
 	}
-	u.seen[key] = struct{}{}
-	return &updated, nil
+
+	// Return the canonical edge (smallest propID) for backward compatibility.
+	return u.storage.GetEdge(fromID, toID)
 }
 
 func (u *EMAUpdater) UpdateNode(nodeID string, obs float64, eventID string) (*types.NodeDescriptor, error) {
@@ -107,24 +124,36 @@ func (u *EMAUpdater) UpdateNode(nodeID string, obs float64, eventID string) (*ty
 	return &updated, nil
 }
 
+// Reset restores every edge between (fromID, toID) to its prior state:
+// EMAWeight = PriorWeight, NObservations = 0, Confidence = 0.0. For
+// conflict-pair propositions this resets both halves together so the agent
+// re-enters cold-start mode for that construct pair consistently.
 func (u *EMAUpdater) Reset(fromID, toID string) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
-	edge, err := u.storage.GetEdge(fromID, toID)
+	edges, err := u.storage.GetEdgesByPair(fromID, toID)
 	if err != nil {
 		return err
 	}
-	if edge == nil {
+	if len(edges) == 0 {
 		return fmt.Errorf("edge %s→%s not found", fromID, toID)
 	}
 
-	reset := *edge
-	reset.EMAWeight = edge.PriorWeight
-	reset.NObservations = 0
-	reset.Confidence = 0.0
+	for _, edge := range edges {
+		reset := *edge
+		reset.EMAWeight = edge.PriorWeight
+		reset.NObservations = 0
+		reset.Confidence = 0.0
+		if err := u.storage.PutEdge(&reset); err != nil {
+			return err
+		}
+	}
 
-	// Clear seen entries for this edge so future events are processed normally.
+	// Clear seen entries for this construct pair so future events are
+	// processed normally. The seen-key format from UpdateEdge starts with
+	// "from→to:" so the prefix match drops every (propID, eventID) for this
+	// pair in one pass.
 	prefix := fmt.Sprintf("%s→%s:", fromID, toID)
 	for k := range u.seen {
 		if len(k) >= len(prefix) && k[:len(prefix)] == prefix {
@@ -132,5 +161,5 @@ func (u *EMAUpdater) Reset(fromID, toID string) error {
 		}
 	}
 
-	return u.storage.PutEdge(&reset)
+	return nil
 }

@@ -11,20 +11,15 @@ import (
 )
 
 // TestPerKDSeedingMatchesPriorWeights is the numerical verification that
-// `-kd <name>` actually applies the per-distribution edge weights from
+// `-kd <name>` applies the per-distribution edge weights from
 // prior_weights.json. For each (proposition, KD) pair in the file, the seeded
-// EdgeDescriptor.PriorWeight must equal distribution_edge_weights[kd][edge_key].prior_weight.
+// EdgeDescriptor.PriorWeight must equal
+// distribution_edge_weights[kd][edge_key].prior_weight.
 //
-// KNOWN LIMITATION: InMemoryStorage keys edges by (fromID, toID), so the three
-// "conflict-pair" propositions in Di-Select — P2/P3 (RC→PS, opposite directions),
-// P5/P6 (CO→RR), and P7/P9 (CE→MU) — collide on a single storage entry.
-// The storage backbone is a multigraph by design (15 propositions over 12
-// distinct construct pairs) but the current storage models a simple directed
-// graph. As a result only 12 of the 15 propositions are reachable via
-// AllEdges(). See SEMANTIC-MAP-STATUS.md §5 for the open issue.
-//
-// This test verifies that the 12 edges that ARE stored have correct per-KD
-// values. The multigraph fix is tracked separately.
+// The storage backbone is a multigraph: Di-Select has three "conflict-pair"
+// propositions (P2/P3 on RC→PS, P5/P6 on CO→RR, P7/P9 on CE→MU) sharing
+// endpoints but with distinct PropositionIDs and opposite directions. Storage
+// must hold all 15 propositions as independent EdgeDescriptors.
 func TestPerKDSeedingMatchesPriorWeights(t *testing.T) {
 	pwPath := findPriorWeightsFile(t)
 
@@ -79,10 +74,11 @@ func TestPerKDSeedingMatchesPriorWeights(t *testing.T) {
 				}
 				matched++
 			}
-			// 12 unique (from, to) pairs across the 15 Di-Select propositions —
-			// see the multigraph limitation note on this function.
-			if matched < 12 {
-				t.Errorf("expected ≥12 matched edges (unique (from,to) pairs in P1–P15); got %d", matched)
+			// All 15 Di-Select propositions (P1–P15) must be present after
+			// seeding — the multigraph storage holds one descriptor per
+			// proposition, including the three conflict pairs.
+			if matched < 15 {
+				t.Errorf("expected ≥15 matched edges (P1–P15) after multigraph seeding; got %d", matched)
 			}
 		})
 	}

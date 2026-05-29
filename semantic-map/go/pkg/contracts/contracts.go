@@ -11,15 +11,25 @@ import "github.com/DiyazY/di-agent/pkg/types"
 
 // StorageContract persists node and edge descriptors.
 //
+// The edge graph is a multigraph: two propositions may share the same
+// (fromID, toID) endpoints with opposite directions (e.g. Di-Select's P2/P3
+// both span RC→PS). Storage must therefore key edges by the full triple
+// (fromID, toID, propositionID), not by endpoints alone.
+//
 // Guarantees:
 //   - Atomicity: Put operations either fully succeed or leave prior state intact.
 //   - Nil safety: Get operations return (nil, nil) for unknown IDs; they never
 //     return a non-nil error for a simple miss.
-//   - Empty-safe: Neighbors and AllEdges return empty slices, never nil.
+//   - Empty-safe: Neighbors, AllEdges, and GetEdgesByPair return empty slices,
+//     never nil.
+//   - Multigraph: GetEdgesByPair returns every edge between (fromID, toID).
+//     GetEdge returns one — the entry with the lexicographically smallest
+//     PropositionID — for backward-compatible simple-graph access.
 type StorageContract interface {
 	GetNode(nodeID string) (*types.NodeDescriptor, error)
 	PutNode(d *types.NodeDescriptor) error
 	GetEdge(fromID, toID string) (*types.EdgeDescriptor, error)
+	GetEdgesByPair(fromID, toID string) ([]*types.EdgeDescriptor, error)
 	PutEdge(d *types.EdgeDescriptor) error
 	Neighbors(nodeID string) ([]string, error)
 	AllEdges() ([]*types.EdgeDescriptor, error)

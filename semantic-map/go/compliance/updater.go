@@ -99,4 +99,82 @@ func RunUpdaterCompliance(t *testing.T, factory UpdaterFactory) {
 			t.Errorf("confidence should increase: %.4f -> %.4f", c0.Confidence, c1.Confidence)
 		}
 	})
+
+	// ── Multigraph behavior ──────────────────────────────────────────────────
+	//
+	// When two propositions share the same (from, to) endpoints (a "conflict
+	// pair"), one observation must update both edges. Each edge maintains its
+	// own EMA so they diverge as evidence accumulates; idempotency is tracked
+	// per-edge so replays don't double-count.
+
+	seedConflictPair := func(t *testing.T) (contracts.UpdaterContract, contracts.StorageContract) {
+		t.Helper()
+		u, s := factory(t)
+		_ = s.PutEdge(&types.EdgeDescriptor{
+			FromID: "RC", ToID: "PS", PropositionID: "P2",
+			Direction: types.Negative, PriorWeight: 0.5, EMAWeight: 0.5,
+		})
+		_ = s.PutEdge(&types.EdgeDescriptor{
+			FromID: "RC", ToID: "PS", PropositionID: "P3",
+			Direction: types.Positive, PriorWeight: 0.5, EMAWeight: 0.5,
+		})
+		return u, s
+	}
+
+	t.Run("UpdateEdgeReachesEveryProposition", func(t *testing.T) {
+		u, s := seedConflictPair(t)
+		if _, err := u.UpdateEdge("RC", "PS", 1.0, "evt-1"); err != nil {
+			t.Fatal(err)
+		}
+		pair, _ := s.GetEdgesByPair("RC", "PS")
+		if len(pair) != 2 {
+			t.Fatalf("expected 2 edges on RC→PS; got %d", len(pair))
+		}
+		for _, e := range pair {
+			if e.NObservations != 1 {
+				t.Errorf("edge %s NObservations = %d; expected 1 (every edge in the pair must receive the update)",
+					e.PropositionID, e.NObservations)
+			}
+			if e.EMAWeight <= 0.5 {
+				t.Errorf("edge %s EMA = %.4f; expected > 0.5 after positive observation",
+					e.PropositionID, e.EMAWeight)
+			}
+		}
+	})
+
+	t.Run("IdempotencyIsPerEdgeInPair", func(t *testing.T) {
+		u, s := seedConflictPair(t)
+		// Same observation, same eventID, replayed.
+		_, _ = u.UpdateEdge("RC", "PS", 0.9, "evt-X")
+		_, _ = u.UpdateEdge("RC", "PS", 0.9, "evt-X")
+		pair, _ := s.GetEdgesByPair("RC", "PS")
+		for _, e := range pair {
+			if e.NObservations != 1 {
+				t.Errorf("edge %s NObservations = %d; replayed eventID must not double-count",
+					e.PropositionID, e.NObservations)
+			}
+		}
+	})
+
+	t.Run("ResetClearsEveryEdgeInPair", func(t *testing.T) {
+		u, s := seedConflictPair(t)
+		_, _ = u.UpdateEdge("RC", "PS", 0.9, "evt-1")
+		_, _ = u.UpdateEdge("RC", "PS", 0.8, "evt-2")
+		if err := u.Reset("RC", "PS"); err != nil {
+			t.Fatal(err)
+		}
+		pair, _ := s.GetEdgesByPair("RC", "PS")
+		for _, e := range pair {
+			if e.EMAWeight != e.PriorWeight {
+				t.Errorf("edge %s EMAWeight = %.4f; should equal PriorWeight = %.4f after Reset",
+					e.PropositionID, e.EMAWeight, e.PriorWeight)
+			}
+			if e.NObservations != 0 {
+				t.Errorf("edge %s NObservations = %d; should be 0 after Reset", e.PropositionID, e.NObservations)
+			}
+			if e.Confidence != 0.0 {
+				t.Errorf("edge %s Confidence = %.4f; should be 0 after Reset", e.PropositionID, e.Confidence)
+			}
+		}
+	})
 }
