@@ -12,11 +12,57 @@ For design rationale, contract decisions, language strategy, and research connec
 
 ## Table of Contents
 
+- [Quick Start](#quick-start)
 - [1. Project Structure](#1-project-structure)
 - [2. The Agent API](#2-the-agent-api)
 - [3. Running the Edge Daemon](#3-running-the-edge-daemon)
 - [4. Compliance Tests](#4-compliance-tests)
 - [5. Prior Initialization](#5-prior-initialization)
+
+---
+
+## Quick Start
+
+Five commands to see the live ontology end-to-end. Requires Go 1.22+. See [ARCHITECTURE.md §9](ARCHITECTURE.md#9-control-surface) for the design.
+
+```bash
+# 1. Start the daemon (edge-minimal profile, in-memory)
+cd semantic-map/go
+go run ./cmd/agent -profile edge-minimal -addr :8080 &
+```
+
+```bash
+# 2. Read the backbone over HTTP
+curl -s localhost:8080/graph | jq '{constructs:(.constructs|length),
+                                    propositions:(.propositions|length),
+                                    edges:(.edges|length)}'
+# → {"constructs":7,"propositions":15,"edges":15}
+
+curl -s 'localhost:8080/edges?from=RC&to=PS' | jq 'length'
+# → 2  (P2 and P3 — the multigraph conflict pair)
+```
+
+```bash
+# 3. Drive the agent from the terminal
+go run ./cmd/mapctl graph                 # table view of the snapshot
+go run ./cmd/mapctl edges --from RC --to PS
+go run ./cmd/mapctl deprecate P1 "smoke test"   # soft-delete a proposition
+go run ./cmd/mapctl history --since 1h    # audit log entries
+go run ./cmd/mapctl reset RC PS           # EMA → prior
+```
+
+```bash
+# 4. Open the embedded viewer (Cytoscape.js)
+open http://localhost:8080/ui/            # macOS; xdg-open on Linux
+# → click an edge → side panel populates → Deprecate / Set strength / Reset
+```
+
+```bash
+# 5. Tear down
+kill %1
+```
+
+Three surfaces, one daemon: `curl` for inspection, `mapctl` for scripts and headless ops, the browser at `/ui/` for click-to-mutate demos. All three speak the same JSON HTTP API.
 
 ---
 
@@ -162,7 +208,44 @@ Lists Proposer candidate edges pending review.
   "mi_score":0.73,"p_value":0.002,"n_observations":1240,"deployments_seen":2,"status":0}]
 ```
 
-Review via `POST /candidates/{id}/confirm`, `/reject`, or `/defer` — Year 2 scope.
+Review via `POST /candidates/{id}/confirm`, `/reject`, or `/defer`.
+
+### Full endpoint table
+
+The five summaries above are the original control-plane queries. Phase 1 of the control-surface work added 14 endpoints for graph introspection, ontology mutations, candidate review, meta probes, and the embedded UI. All Phase 1 endpoints return JSON on both success and failure; mutation POSTs require `Content-Type: application/json` (lightweight CSRF mitigation — see [ARCHITECTURE.md §9](ARCHITECTURE.md#9-control-surface)).
+
+| Verb | Path                                | Body / params                                            | Since    |
+| ---- | ----------------------------------- | -------------------------------------------------------- | -------- |
+| POST | `/ingest`                           | `{from_id,to_id,observation,event_id}`                   | existing |
+| GET  | `/cost`                             | `?task=&node=`                                           | existing |
+| POST | `/recommend`                        | `OffloadContext`                                         | existing |
+| POST | `/simulate`                         | `{context, target_node_id}`                              | existing |
+| GET  | `/candidates`                       | —                                                        | existing |
+| GET  | `/graph`                            | —                                                        | Phase 1  |
+| GET  | `/edges`                            | `?from=&to=`                                             | Phase 1  |
+| GET  | `/constructs`                       | —                                                        | Phase 1  |
+| GET  | `/propositions`                     | —                                                        | Phase 1  |
+| GET  | `/history`                          | `?since=` (RFC3339 or duration)                          | Phase 1  |
+| GET  | `/neighbors`                        | `?node=`                                                 | Phase 1  |
+| GET  | `/healthz`                          | —                                                        | Phase 1  |
+| GET  | `/version`                          | —                                                        | Phase 1  |
+| POST | `/ontology/strength`                | `{proposition_id, strength}`                             | Phase 1  |
+| POST | `/ontology/deprecate`               | `{proposition_id, reason}`                               | Phase 1  |
+| POST | `/ontology/construct`               | `{construct_id, name, description}`                      | Phase 1  |
+| POST | `/ontology/proposition`             | `{proposition_id, from, to, direction:"+"|"-", prior_strength}` | Phase 1 |
+| POST | `/agent/reset`                      | `{from, to}`                                             | Phase 1  |
+| POST | `/candidates/{id}/confirm`          | path only                                                | Phase 1  |
+| POST | `/candidates/{id}/reject`           | path only                                                | Phase 1  |
+| POST | `/candidates/{id}/defer`            | path only                                                | Phase 1  |
+| GET  | `/ui/...`                           | —                                                        | Phase 2B |
+
+JSON error shape for Phase 1 endpoints:
+
+```json
+{"error": "Content-Type must be application/json"}
+```
+
+The five pre-Phase-1 endpoints keep `http.Error`'s plain-text error body for backward compatibility.
 
 ---
 
