@@ -63,16 +63,14 @@ func registerRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 	registerStaticRoutes(mux)
 }
 
-// registerStaticRoutes serves the embedded UI under /ui/. Phase 1 ships a
-// placeholder; Phase 2B replaces it with the real Cytoscape viewer.
+// registerStaticRoutes serves the embedded UI under /ui/.
 //
-// The bare /ui/ path redirects to /ui/index.html to give the UI a
-// stable entry URL even before Phase 2B lands.
+// http.FileServer serves index.html for the directory root automatically
+// when the URL ends in "/". An explicit "/ui/{$}" → "/ui/index.html"
+// redirect would loop because http.FileServer canonicalizes URLs ending
+// in /index.html back to "./" — so we rely on the default behavior.
 func registerStaticRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /ui/", staticHandler())
-	mux.HandleFunc("GET /ui/{$}", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/ui/index.html", http.StatusFound)
-	})
 }
 
 // registerExistingRoutes preserves the original five endpoints unchanged.

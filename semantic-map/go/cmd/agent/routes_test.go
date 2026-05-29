@@ -445,10 +445,13 @@ func TestStaticUI_ServesPlaceholder(t *testing.T) {
 	}
 }
 
-func TestStaticUI_RootRedirectsToIndex(t *testing.T) {
+func TestStaticUI_RootServesIndex(t *testing.T) {
+	// http.FileServer serves the directory's index.html for "/" requests
+	// directly (200 with body), without a redirect. We do NOT install an
+	// explicit /ui/{$} → /ui/index.html redirect because that would loop
+	// with the stdlib's /index.html → ./ canonicalization.
 	base, _, cleanup := newTestAgent(t)
 	defer cleanup()
-	// Disable auto-follow so we can observe the redirect.
 	client := &http.Client{
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -459,11 +462,8 @@ func TestStaticUI_RootRedirectsToIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 302 {
-		t.Errorf("/ui/: status %d, want 302", resp.StatusCode)
-	}
-	if loc := resp.Header.Get("Location"); loc != "/ui/index.html" {
-		t.Errorf("Location header: got %q, want /ui/index.html", loc)
+	if resp.StatusCode != 200 {
+		t.Errorf("/ui/: status %d, want 200", resp.StatusCode)
 	}
 }
 
