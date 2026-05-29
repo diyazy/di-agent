@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Semantic Map &mdash; Live Ontology</title>
+  <link rel="stylesheet" href="/ui/style.css" />
+  <!--
+    Cytoscape.js is loaded from a pinned CDN. Built-in cose layout is
+    sufficient for a 7-node graph; no extra extension libraries are needed.
+  -->
+  <script src="https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Semantic Map</h1>
+    <div class="header-meta">
+      <span id="health-dot" class="health-dot health-unknown" title="agent health"></span>
+      <span id="health-label">checking&hellip;</span>
+      <label class="auto-refresh">
+        <input type="checkbox" id="auto-refresh" /> auto-refresh (5s)
+      </label>
+      <button id="refresh-btn" type="button">Refresh</button>
+    </div>
+  </header>
+
+  <main>
+    <div id="cy"></div>
+
+    <aside id="panel">
+      <section id="panel-empty" class="panel-section">
+        <p class="hint">Click an edge in the graph to inspect its descriptor and history.</p>
+        <p class="hint small">Edges colored <span class="legend-pos">green</span> for positive direction, <span class="legend-neg">red</span> for negative. Dashed edges are deprecated. Opacity scales with confidence.</p>
+      </section>
+
+      <section id="panel-edge" class="panel-section hidden">
+        <h2>Edge descriptor</h2>
+        <table id="edge-table">
+          <tbody>
+            <tr><th>FromID</th><td id="ed-from"></td></tr>
+            <tr><th>ToID</th><td id="ed-to"></td></tr>
+            <tr><th>PropositionID</th><td id="ed-pid"></td></tr>
+            <tr><th>Direction</th><td id="ed-dir"></td></tr>
+            <tr><th>PriorWeight</th><td id="ed-prior"></td></tr>
+            <tr><th>EMAWeight</th><td id="ed-ema"></td></tr>
+            <tr><th>Confidence</th><td id="ed-conf"></td></tr>
+            <tr><th>NObservations</th><td id="ed-nobs"></td></tr>
+            <tr><th>Deprecated</th><td id="ed-deprecated"></td></tr>
+          </tbody>
+        </table>
+
+        <h2>Recent history</h2>
+        <ol id="history-list" class="history-list">
+          <li class="hint small">No history yet for this proposition.</li>
+        </ol>
+
+        <div class="panel-actions">
+          <button id="btn-strength" type="button">Set strength</button>
+          <button id="btn-deprecate" type="button">Deprecate</button>
+          <button id="btn-reset" type="button">Reset</button>
+        </div>
+      </section>
+    </aside>
+  </main>
+
+  <!--
+    Single modal dialog. Class is swapped per action (modal-strength,
+    modal-deprecate, modal-reset). One openModal(kind, edge) call in app.js
+    populates the right fields and rebinds the submit handler.
+  -->
+  <dialog id="modal">
+    <form method="dialog" id="modal-form">
+      <h2 id="modal-title">Action</h2>
+      <p id="modal-subtitle" class="hint small"></p>
+
+      <div class="modal-field modal-strength-field">
+        <label for="modal-strength-input">Strength (0.0 &ndash; 1.0)</label>
+        <input type="number" id="modal-strength-input" min="0" max="1" step="0.01" value="0.5" />
+      </div>
+
+      <div class="modal-field modal-deprecate-field">
+        <label for="modal-reason-input">Reason</label>
+        <input type="text" id="modal-reason-input" placeholder="e.g. superseded by new evidence" />
+      </div>
+
+      <div class="modal-field modal-reset-field">
+        <p class="hint">This will reset the EMA weight on the edge from <strong id="modal-reset-from"></strong> &rarr; <strong id="modal-reset-to"></strong> back to its prior. History will record the reset.</p>
+      </div>
+
+      <div class="modal-actions">
+        <button type="button" id="modal-cancel">Cancel</button>
+        <button type="submit" id="modal-submit">Confirm</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toasts" aria-live="polite" aria-atomic="true"></div>
+
+  <script src="/ui/app.js"></script>
+</body>
+</html>
