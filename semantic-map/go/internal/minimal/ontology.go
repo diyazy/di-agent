@@ -24,16 +24,36 @@ func NewStaticDiSelectOntology() *StaticDiSelectOntology {
 	}
 }
 
+// Constructs returns a defensive copy of the construct list. Callers may mutate
+// the returned slice or its elements without affecting the ontology's internal
+// state; to register a new construct, use the ontology's setters.
 func (o *StaticDiSelectOntology) Constructs() ([]*types.Construct, error) {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
-	return o.constructs, nil
+	out := make([]*types.Construct, len(o.constructs))
+	for i, c := range o.constructs {
+		cp := *c
+		out[i] = &cp
+	}
+	return out, nil
 }
 
+// Propositions returns a defensive copy of the proposition list. Mutating
+// returned entries does NOT update the ontology — use SetPropositionStrength
+// (or AddValidatedProposition) to make changes.
 func (o *StaticDiSelectOntology) Propositions() ([]*types.Proposition, error) {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
-	return o.propositions, nil
+	out := make([]*types.Proposition, len(o.propositions))
+	for i, p := range o.propositions {
+		cp := *p
+		// EvidenceSources is a slice — copy it to avoid shared backing array.
+		if len(p.EvidenceSources) > 0 {
+			cp.EvidenceSources = append([]string(nil), p.EvidenceSources...)
+		}
+		out[i] = &cp
+	}
+	return out, nil
 }
 
 func (o *StaticDiSelectOntology) Relationships(constructID string) ([]*types.Proposition, error) {
@@ -42,10 +62,30 @@ func (o *StaticDiSelectOntology) Relationships(constructID string) ([]*types.Pro
 	var out []*types.Proposition
 	for _, p := range o.propositions {
 		if p.FromConstruct == constructID || p.ToConstruct == constructID {
-			out = append(out, p)
+			cp := *p
+			if len(p.EvidenceSources) > 0 {
+				cp.EvidenceSources = append([]string(nil), p.EvidenceSources...)
+			}
+			out = append(out, &cp)
 		}
 	}
 	return out, nil
+}
+
+// SetPropositionStrength updates the PriorStrength of an existing proposition.
+// This is the safe way to apply calibrated values from prior_weights.json
+// without mutating pointers returned by Propositions(). Returns an error if
+// the proposition ID is not found.
+func (o *StaticDiSelectOntology) SetPropositionStrength(propositionID string, strength float64) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for _, p := range o.propositions {
+		if p.PropositionID == propositionID {
+			p.PriorStrength = strength
+			return nil
+		}
+	}
+	return fmt.Errorf("proposition %q not found", propositionID)
 }
 
 func (o *StaticDiSelectOntology) ValidateProposition(fromID, toID string, dir types.Direction) (*types.ValidationResult, error) {

@@ -9,6 +9,7 @@ import (
 	"github.com/DiyazY/di-agent/compliance"
 	"github.com/DiyazY/di-agent/internal/minimal"
 	"github.com/DiyazY/di-agent/pkg/contracts"
+	"github.com/DiyazY/di-agent/pkg/types"
 )
 
 func TestInMemoryStorageCompliance(t *testing.T) {
@@ -36,6 +37,68 @@ func TestCgroupCollectorCompliance(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 		return c
 	})
+}
+
+func TestStaticDiSelectOntologyCompliance(t *testing.T) {
+	compliance.RunOntologyCompliance(t, func(t *testing.T) contracts.OntologyContract {
+		return minimal.NewStaticDiSelectOntology()
+	})
+}
+
+func TestRuleEngineReasonerCompliance(t *testing.T) {
+	compliance.RunReasonerCompliance(t, func(t *testing.T) contracts.ReasonerContract {
+		// The reasoner reads from storage that the ontology has seeded. Build
+		// the same wiring the edge-minimal profile uses so the compliance suite
+		// exercises a realistic configuration.
+		s := minimal.NewInMemoryStorage()
+		o := minimal.NewStaticDiSelectOntology()
+		seedReasonerState(t, s, o)
+		return minimal.NewRuleEngineReasoner(s, o, 0.5)
+	})
+}
+
+func TestDisabledProposerCompliance(t *testing.T) {
+	compliance.RunProposerCompliance(t, func(t *testing.T) contracts.ProposerContract {
+		return minimal.NewDisabledProposer()
+	})
+}
+
+// seedReasonerState seeds storage with one node per construct and one edge per
+// proposition, mirroring what profiles.seedFromOntology does at daemon startup.
+// Without seeding, the reasoner has nothing to traverse and GraphPathUsed
+// would be empty.
+func seedReasonerState(t *testing.T, s *minimal.InMemoryStorage, o *minimal.StaticDiSelectOntology) {
+	t.Helper()
+	cs, err := o.Constructs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cs {
+		if err := s.PutNode(&types.NodeDescriptor{
+			NodeID:        c.ConstructID,
+			ConstructType: c.Name,
+			PriorValue:    0.5,
+			EMAValue:      0.5,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ps, err := o.Propositions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range ps {
+		if err := s.PutEdge(&types.EdgeDescriptor{
+			FromID:        p.FromConstruct,
+			ToID:          p.ToConstruct,
+			PropositionID: p.PropositionID,
+			Direction:     p.Direction,
+			PriorWeight:   p.PriorStrength,
+			EMAWeight:     p.PriorStrength,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 // newFakeCgroupRoot creates a temp directory with valid cgroups v2 files
