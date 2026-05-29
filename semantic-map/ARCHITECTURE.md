@@ -20,6 +20,7 @@ Design rationale and decision record. Update this file when a contract, profile,
 - [6. Automatic Graph Extension](#6-automatic-graph-extension)
 - [7. Adding a New Profile](#7-adding-a-new-profile)
 - [8. Connection to Research](#8-connection-to-research)
+- [9. Control Surface](#9-control-surface)
 
 ---
 
@@ -318,3 +319,135 @@ No other file needs to change.
 2. Prior initialization protocol connecting Di-Select to agent runtime (grounded in P1–P5 empirical constants)
 3. Convergence study: how quickly does deployment evidence override generic priors?
 4. Propose-then-confirm loop: controlled automatic backbone extension with structural validation
+
+---
+
+## 9. Control Surface
+
+The Semantic Map facade is a Go API. The agent daemon wraps it in three layers so that operators, scripts, and demos can drive the same surface without sharing process memory:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Layer C — Web UI         cmd/agent/static/{index,app,style} │
+│  Vanilla JS + Cytoscape.js, embedded via go:embed all:static │
+│  Click-to-mutate viewer at /ui/                              │
+├─────────────────────────────────────────────────────────────┤
+│  Layer B — CLI            cmd/mapctl/                        │
+│  cobra + tablewriter; one binary, sixteen subcommands        │
+│  Default --addr http://localhost:8080; --json for scripting  │
+├─────────────────────────────────────────────────────────────┤
+│  Layer A — HTTP API       cmd/agent/{routes,dto,static}.go   │
+│  net/http only; JSON in/out; CSRF via Content-Type guard     │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+                  SemanticMap facade (pkg/semmap)
+```
+
+Every layer talks to the layer above only via HTTP — the CLI does not import `cmd/agent`, and the UI is served as static assets. This is deliberate: the daemon is the single integration point, and any third tool (e.g. a future TUI, a fleet controller) only needs to speak JSON to participate.
+
+### HTTP API
+
+Two endpoint families coexist on the same mux. The five pre-existing endpoints (`/ingest`, `/cost`, `/recommend`, `/simulate`, `/candidates`) keep their original `http.Error` plain-text error format to minimize diff against the v0 daemon. Every endpoint added in the Phase 1 expansion emits structured JSON errors and gates mutations on `Content-Type: application/json`.
+
+| Verb | Path                              | Request body / params                                                  | Response (2xx)                | Semantics                                                                                              |
+| ---- | --------------------------------- | ---------------------------------------------------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------ |
+| GET  | `/healthz`                        | —                                                                      | `{"ok":true}`                 | Liveness probe; never touches the facade                                                                |
+| GET  | `/version`                        | —                                                                      | `VersionResponse`             | Agent version, Go runtime, build commit, construct/proposition counts                                  |
+| GET  | `/graph`                          | —                                                                      | `GraphSnapshot`               | Full snapshot: every construct, every proposition (incl. deprecated), every edge                       |
+| GET  | `/edges`                          | `?from=&to=` (either or both, optional)                                | `[]EdgeDTO`                   | Filtered edge list; when both `from` and `to` are set, returns the conflict-pair multigraph fan-out    |
+| GET  | `/constructs`                     | —                                                                      | `[]ConstructDTO`              | Backbone nodes                                                                                         |
+| GET  | `/propositions`                   | —                                                                      | `[]PropositionDTO`            | All propositions including those soft-deleted by `Deprecate` (the DTO carries a `deprecated` flag)     |
+| GET  | `/history`                        | `?since=` (RFC3339 timestamp or Go duration like `1h`; omitted → zero) | `[]OntologyEventDTO`          | Append-only audit log of mutations                                                                     |
+| GET  | `/neighbors`                      | `?node=ID` (required)                                                  | `[]string`                    | IDs of constructs reachable in one hop                                                                 |
+| POST | `/ontology/strength`              | `SetStrengthRequest`                                                   | `204 No Content`              | Recalibrate `prior_strength` for one proposition; audit-logged                                          |
+| POST | `/ontology/deprecate`             | `DeprecateRequest`                                                     | `204 No Content`              | Soft-delete a proposition (Reasoner skips deprecated edges; descriptor stays in storage for audit)     |
+| POST | `/ontology/construct`             | `AddConstructRequest`                                                  | `204 No Content`              | Append a new construct (append-only; constructs are domain-stable)                                     |
+| POST | `/ontology/proposition`           | `AddPropositionRequest` (`direction` is `"+"` or `"-"`)                | `204 No Content`              | Add a validated proposition; `ValidateProposition` rejects direction contradictions                    |
+| POST | `/agent/reset`                    | `ResetRequest`                                                         | `204 No Content`              | Reset the EMA for a `(from, to)` pair back to its prior — does not delete the edge                     |
+| POST | `/candidates/{id}/confirm`        | path only                                                              | `204 No Content`              | Promote a proposer candidate to a validated proposition                                                |
+| POST | `/candidates/{id}/reject`         | path only                                                              | `204 No Content`              | Permanently suppress a candidate within the session                                                    |
+| POST | `/candidates/{id}/defer`          | path only                                                              | `204 No Content`              | Keep the candidate pending; re-surface on next review                                                  |
+| GET  | `/ui/...`                         | —                                                                      | static assets                 | Embedded HTML/JS/CSS for the viewer; served by `http.FileServer` over an `embed.FS` sub-tree            |
+
+Errors on the new endpoints follow a single shape:
+
+```json
+{"error": "Content-Type must be application/json"}
+```
+
+`writeError` (in `cmd/agent/routes.go`) is the only path to a non-2xx response. The five pre-existing endpoints retain `http.Error`'s plain-text body for backward compatibility.
+
+### CSRF mitigation: `requireJSON`
+
+There is no auth in v1 — the daemon is intended for lab-network localhost. To stop a malicious page in a browser from issuing cross-origin mutations against a daemon on `localhost:8080`, every body-bearing POST handler calls `requireJSON(r)` and rejects requests whose `Content-Type` is not `application/json`. Browsers do not send that header on simple cross-origin form posts, so a CSRF attempt fails the Content-Type check before reaching the facade. The path-only candidate-review endpoints (`/candidates/{id}/{confirm,reject,defer}`) skip the check because they take no body; the candidate ID being unguessable in practice (UUID-shaped) is the mitigation.
+
+This is sufficient for the v1 threat model. When the agent grows beyond localhost, a token-based auth layer is the next step (tracked in the plan's "Out of scope for v1" section).
+
+### Direction on the wire: `"+"` vs `"-"`
+
+`types.Direction` is a Go `int` internally (0 / 1). The DTO layer in `cmd/agent/dto.go` converts it to `"+"` (positive) and `"-"` (negative) before JSON serialization. Raw integers would render unreadably in CLI tables and UI legends; the string form preserves the publication notation. Mappers — `edgeToDTO`, `propositionToDTO`, `constructToDTO`, `eventToDTO` — are the only places conversion happens.
+
+### Static UI: `embed.FS` with no explicit redirect
+
+`cmd/agent/static.go` declares `//go:embed all:static` and exposes the sub-tree under `/ui/` via `http.FileServer(http.FS(sub))`. The `all:` prefix is required so dot-prefixed files (e.g. `.gitkeep`) are bundled into the binary.
+
+There is no explicit `/ui/{$}` → `/ui/index.html` redirect. `http.FileServer` already serves `index.html` for directory roots that end in `/`, and it independently canonicalizes any URL ending in `/index.html` back to `./`. The two behaviors compose into an infinite redirect loop if you also add a manual `/ui/{$}` → `/ui/index.html` handler — which is what the v0 expansion did, and what hotfix `edffaa3` removed. The rule is: trust the file server, do not redirect.
+
+### The `mapctl` CLI
+
+`cmd/mapctl/` is a separate Go binary that speaks the same HTTP API. It exists for three reasons:
+
+1. **Scripting.** `--json` makes every subcommand emit a parseable payload, suitable for Bash pipelines and CI checks.
+2. **Demo control.** Subcommands map one-to-one to mutations the UI offers, so a recorded terminal session is a deterministic alternative to a click-through.
+3. **Headless ops.** RPi4 nodes often lack a browser; the CLI is the only operator surface there.
+
+| Subcommand                          | Wraps                                       | Notes                                                       |
+| ----------------------------------- | ------------------------------------------- | ----------------------------------------------------------- |
+| `graph`                             | `GET /graph`                                | Default table; `--json` for raw                             |
+| `edges --from --to`                 | `GET /edges`                                | Multigraph: returns both edges for RC→PS, CO→RR, CE→MU      |
+| `history --since`                   | `GET /history`                              | RFC3339 or duration                                         |
+| `strength <id> <value>`             | `POST /ontology/strength`                   | Recalibrate one proposition                                 |
+| `deprecate <id> <reason>`           | `POST /ontology/deprecate`                  | Soft-delete                                                 |
+| `construct add <id> <name> <desc>`  | `POST /ontology/construct`                  |                                                             |
+| `proposition add <id> <f> <t> ±<s>` | `POST /ontology/proposition`                |                                                             |
+| `reset <from> <to>`                 | `POST /agent/reset`                         | EMA → prior                                                 |
+| `candidates [list|confirm|reject|defer]` | `GET/POST /candidates*`                 |                                                             |
+| `recommend` / `simulate`            | the corresponding POST                      | Existing endpoints                                          |
+| `watch graph|edges`                 | polled GET                                  | 2s ticker; clear-screen unless `--no-color`                 |
+| `dot`                               | `GET /graph` → Graphviz                     | Direct paste into `dot -Tpdf`                               |
+| `health` / `version`                | `GET /healthz` / `GET /version`             | `version` also prints client build                          |
+
+DTOs are duplicated in `cmd/mapctl/client/types.go` rather than imported from `cmd/agent` — the duplication is the contract. Treating the daemon as a remote service from day one means a third party can write a Python or Rust client without reverse-engineering Go types.
+
+Dependencies: `github.com/spf13/cobra v1.8.1`, `github.com/olekukonko/tablewriter v0.0.5`. `tablewriter` is pinned below 1.x because the 1.x API revamp is breaking.
+
+### The web viewer
+
+`/ui/` serves a single-page application:
+
+- `index.html` — markup: header (title + healthz dot + refresh), Cytoscape mount, side panel, one `<dialog>` modal, toast container
+- `app.js` — controller: fetches `/graph`, builds the Cytoscape model, renders the side panel from selection events, POSTs mutations back through the same API
+- `style.css` — visual rules: edge color by direction (green `+`, red `−`), opacity proportional to confidence, dashed when deprecated
+
+Cytoscape.js 3.28.1 is loaded from `unpkg.com` (single CDN pin, no build chain). The built-in `cose` layout is sufficient for seven nodes — no extension packages needed.
+
+Mutation flow (single edge):
+
+1. User clicks edge → side panel populates from cached graph state and a filtered `/history` fetch
+2. User clicks Deprecate / Set strength / Reset → the same `<dialog>` opens with class swaps providing the appropriate input
+3. Submit → `fetch(..., {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(req)})`
+4. `204` → success toast → re-fetch `/graph` → Cytoscape redraws (dashed edge for Deprecate, opacity/weight change for Strength, EMA fields reset for Reset)
+5. non-2xx → toast with the server's `{"error":"..."}` message
+
+There is no auto-poll by default; an opt-in checkbox enables a 5-second refresh tick. Same-origin only — no CORS configuration.
+
+### Why three layers, not one
+
+Each layer answers a different question:
+
+- **HTTP API** answers: "what can the agent do, expressed in JSON?"
+- **CLI** answers: "what can an operator do from a script, expressed in subcommands?"
+- **Web UI** answers: "what can a reviewer see and click, expressed visually?"
+
+Collapsing them — e.g. embedding HTML rendering inside Go handlers, or building a TUI that calls `pkg/semmap` directly — would couple the daemon to its consumers. Keeping the HTTP boundary firm means the Netdata adapter (step 5 in `research-docs/SEMANTIC-MAP-STATUS.md`) can land without touching the control surface, and any future client (mobile, TUI, fleet view) can be added without changing the daemon.
