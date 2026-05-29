@@ -25,6 +25,7 @@ import (
 func registerRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 	registerExistingRoutes(mux, sm)
 	registerReadRoutes(mux, sm)
+	registerMutationRoutes(mux, sm)
 }
 
 // registerExistingRoutes preserves the original five endpoints unchanged.
@@ -287,6 +288,149 @@ func registerReadRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 			SemmapConstructs:   nC,
 			SemmapPropositions: nP,
 		})
+	})
+}
+
+// registerMutationRoutes wires the ontology and edge mutation endpoints.
+//
+// Every body-bearing handler:
+//  1. Calls requireJSON (CSRF mitigation: rejects non-application/json bodies)
+//  2. Decodes the typed DTO from the body
+//  3. Calls the facade and returns 204 No Content on success
+//  4. Emits writeError on any failure
+//
+// The path-only candidate endpoints intentionally skip requireJSON because
+// they take no body — the CSRF concern there is satisfied by the path
+// parameter being non-guessable in practice (UUID-shaped candidate IDs).
+func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
+	mux.HandleFunc("POST /ontology/strength", func(w http.ResponseWriter, r *http.Request) {
+		if err := requireJSON(r); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		var req SetStrengthRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := sm.SetPropositionStrength(req.PropositionID, req.Strength); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("POST /ontology/deprecate", func(w http.ResponseWriter, r *http.Request) {
+		if err := requireJSON(r); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		var req DeprecateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := sm.Deprecate(req.PropositionID, req.Reason); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("POST /ontology/construct", func(w http.ResponseWriter, r *http.Request) {
+		if err := requireJSON(r); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		var req AddConstructRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		c := &types.Construct{
+			ConstructID: req.ConstructID,
+			Name:        req.Name,
+			Description: req.Description,
+		}
+		if err := sm.AddConstruct(c); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("POST /ontology/proposition", func(w http.ResponseWriter, r *http.Request) {
+		if err := requireJSON(r); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		var req AddPropositionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		dir, ok := directionFromString(req.Direction)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "direction must be \"+\" or \"-\"")
+			return
+		}
+		p := &types.Proposition{
+			PropositionID: req.PropositionID,
+			FromConstruct: req.From,
+			ToConstruct:   req.To,
+			Direction:     dir,
+			PriorStrength: req.PriorStrength,
+		}
+		if err := sm.AddValidatedProposition(p); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("POST /agent/reset", func(w http.ResponseWriter, r *http.Request) {
+		if err := requireJSON(r); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		var req ResetRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := sm.ResetEdge(req.From, req.To); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	// Path-only candidate review actions. No body, no requireJSON.
+	mux.HandleFunc("POST /candidates/{id}/confirm", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if err := sm.ConfirmCandidate(id); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("POST /candidates/{id}/reject", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if err := sm.RejectCandidate(id); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("POST /candidates/{id}/defer", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if err := sm.DeferCandidate(id); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 }
 
