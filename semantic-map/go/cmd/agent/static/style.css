@@ -1,0 +1,363 @@
+/* Semantic-Map embedded UI styles.
+ *
+ * Layout: header (fixed height) + main flex row. Main is split 70/30 between
+ * the cytoscape graph mount (#cy) and the side panel (#panel). Modal lives
+ * at body level so it overlays everything via the native <dialog> backdrop.
+ *
+ * Color palette is intentionally muted; the only saturated colors are
+ * reserved for the graph edges (green for "+", red for "-") so the panel
+ * never competes for attention with the visualisation.
+ */
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen,
+    Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", sans-serif;
+  background: #f7f8fa;
+  color: #1f2933;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────────── */
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1.25rem;
+  background: #1f2933;
+  color: #f7f8fa;
+  border-bottom: 1px solid #3e4c59;
+  flex: 0 0 auto;
+}
+
+header h1 {
+  font-size: 1.1rem;
+  font-weight: 500;
+  margin: 0;
+  letter-spacing: 0.02em;
+}
+
+.header-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.85rem;
+}
+
+.health-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #9aa5b1;
+}
+
+.health-ok      { background: #2eb872; box-shadow: 0 0 0 2px rgba(46, 184, 114, 0.25); }
+.health-bad     { background: #e63946; box-shadow: 0 0 0 2px rgba(230, 57, 70, 0.25); }
+.health-unknown { background: #9aa5b1; }
+
+.auto-refresh {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: #cbd2d9;
+  cursor: pointer;
+  user-select: none;
+}
+
+header button {
+  background: #3e4c59;
+  color: #f7f8fa;
+  border: 1px solid #52606d;
+  border-radius: 4px;
+  padding: 0.35rem 0.75rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+header button:hover {
+  background: #52606d;
+}
+
+/* ── Main split ─────────────────────────────────────────────────────────── */
+
+main {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;  /* allow children to shrink */
+}
+
+#cy {
+  flex: 0 0 70%;
+  background: #ffffff;
+  border-right: 1px solid #e4e7eb;
+  min-height: 0;
+}
+
+#panel {
+  flex: 1 1 30%;
+  overflow-y: auto;
+  padding: 1rem 1.25rem;
+  background: #ffffff;
+  min-width: 280px;
+}
+
+.panel-section {
+  margin-bottom: 1.5rem;
+}
+
+.panel-section.hidden {
+  display: none;
+}
+
+.panel-section h2 {
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #52606d;
+  margin: 1.25rem 0 0.5rem 0;
+}
+
+.panel-section h2:first-child {
+  margin-top: 0;
+}
+
+.hint {
+  color: #616e7c;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.hint.small {
+  font-size: 0.8rem;
+}
+
+.legend-pos { color: #2eb872; font-weight: 600; }
+.legend-neg { color: #e63946; font-weight: 600; }
+
+/* ── Edge descriptor table ─────────────────────────────────────────────── */
+
+#edge-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+#edge-table th,
+#edge-table td {
+  text-align: left;
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid #e4e7eb;
+}
+
+#edge-table th {
+  color: #52606d;
+  font-weight: 500;
+  width: 40%;
+}
+
+#edge-table td {
+  color: #1f2933;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.82rem;
+}
+
+.dir-pos { color: #2eb872; font-weight: 600; }
+.dir-neg { color: #e63946; font-weight: 600; }
+.flag-deprecated { color: #e63946; font-weight: 600; }
+.flag-active { color: #52606d; }
+
+/* ── History list ──────────────────────────────────────────────────────── */
+
+.history-list {
+  list-style: none;
+  padding-left: 0;
+  margin: 0;
+  font-size: 0.82rem;
+}
+
+.history-list li {
+  padding: 0.4rem 0;
+  border-bottom: 1px dashed #e4e7eb;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  word-break: break-word;
+}
+
+.history-list li:last-child {
+  border-bottom: none;
+}
+
+.history-kind {
+  display: inline-block;
+  font-weight: 600;
+  color: #1f2933;
+  margin-right: 0.5rem;
+}
+
+.history-ts {
+  color: #9aa5b1;
+  font-size: 0.75rem;
+}
+
+/* ── Action buttons ────────────────────────────────────────────────────── */
+
+.panel-actions {
+  margin-top: 1rem;
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.panel-actions button {
+  flex: 1 1 auto;
+  padding: 0.5rem 0.75rem;
+  border-radius: 4px;
+  border: 1px solid #cbd2d9;
+  background: #ffffff;
+  color: #1f2933;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.panel-actions button:hover {
+  background: #f1f4f8;
+  border-color: #9aa5b1;
+}
+
+#btn-deprecate {
+  border-color: #f4b6b6;
+  color: #b81d24;
+}
+
+#btn-deprecate:hover {
+  background: #fbecec;
+}
+
+/* ── Modal dialog ──────────────────────────────────────────────────────── */
+
+#modal {
+  border: none;
+  border-radius: 8px;
+  padding: 1.25rem 1.5rem;
+  min-width: 340px;
+  max-width: 480px;
+  box-shadow: 0 10px 40px rgba(31, 41, 51, 0.2);
+}
+
+#modal::backdrop {
+  background: rgba(31, 41, 51, 0.45);
+}
+
+#modal h2 {
+  margin: 0 0 0.25rem 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+#modal-subtitle {
+  margin: 0 0 1rem 0;
+}
+
+.modal-field {
+  display: none;
+  margin-bottom: 1rem;
+}
+
+.modal-field label {
+  display: block;
+  font-size: 0.85rem;
+  color: #52606d;
+  margin-bottom: 0.35rem;
+}
+
+.modal-field input {
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid #cbd2d9;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  font-family: inherit;
+}
+
+#modal.modal-strength  .modal-strength-field  { display: block; }
+#modal.modal-deprecate .modal-deprecate-field { display: block; }
+#modal.modal-reset     .modal-reset-field     { display: block; }
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.modal-actions button {
+  padding: 0.45rem 0.9rem;
+  border-radius: 4px;
+  border: 1px solid #cbd2d9;
+  background: #ffffff;
+  color: #1f2933;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+#modal-submit {
+  background: #1f2933;
+  color: #f7f8fa;
+  border-color: #1f2933;
+}
+
+#modal-submit:hover {
+  background: #3e4c59;
+}
+
+/* ── Toast notifications ───────────────────────────────────────────────── */
+
+#toasts {
+  position: fixed;
+  top: 4rem;
+  right: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  z-index: 1000;
+  pointer-events: none;
+}
+
+.toast {
+  background: #1f2933;
+  color: #f7f8fa;
+  padding: 0.6rem 0.9rem;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  box-shadow: 0 4px 16px rgba(31, 41, 51, 0.2);
+  max-width: 320px;
+  pointer-events: auto;
+  opacity: 0;
+  transform: translateY(-8px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.toast.toast-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.toast.toast-error {
+  background: #b81d24;
+}
+
+.toast.toast-success {
+  background: #2eb872;
+}
