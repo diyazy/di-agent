@@ -428,20 +428,61 @@ func TestPostWithoutJSONContentType_Returns400(t *testing.T) {
 	}
 }
 
-func TestStaticUI_ServesPlaceholder(t *testing.T) {
+func TestStaticUI_ServesAppJS(t *testing.T) {
+	// Phase 2B replaced the placeholder with the real index.html / app.js /
+	// style.css triple. We assert the embed.FS → /ui/ chain end-to-end by
+	// fetching app.js, which (unlike index.html) is not subject to Go's
+	// FileServer canonicalization redirect (/index.html → ./), so it is the
+	// simplest probe for "file is embedded and served verbatim".
 	base, _, cleanup := newTestAgent(t)
 	defer cleanup()
-	resp, err := http.Get(base + "/ui/placeholder.html")
+	resp, err := http.Get(base + "/ui/app.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		t.Fatalf("placeholder: status %d", resp.StatusCode)
+		t.Fatalf("app.js: status %d", resp.StatusCode)
 	}
 	b, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(b), "replaced in Phase 2B") {
-		t.Errorf("placeholder body should contain marker; got %q", string(b))
+	body := string(b)
+	if !strings.Contains(body, "Semantic-Map embedded UI controller") {
+		t.Errorf("app.js should contain the module banner; got %q", body[:min(len(body), 200)])
+	}
+}
+
+func TestStaticUI_ServesIndexHTML(t *testing.T) {
+	// Validate that index.html is embedded and at least one of:
+	//   (a) returned as 200 with the page body, or
+	//   (b) 301-redirected to ./ by Go's FileServer canonicalization.
+	// Both responses confirm the file is present in the embed.FS; option (b)
+	// is the stdlib's intentional behavior for any URL ending in /index.html
+	// and is independent of our handler wiring.
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := client.Get(base + "/ui/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case 200:
+		b, _ := io.ReadAll(resp.Body)
+		body := string(b)
+		if !strings.Contains(body, "<title>Semantic Map") {
+			t.Errorf("index.html body missing title; got %q", body[:min(len(body), 200)])
+		}
+	case 301:
+		if loc := resp.Header.Get("Location"); loc != "./" {
+			t.Errorf("expected canonicalization redirect to ./, got %q", loc)
+		}
+	default:
+		t.Errorf("/ui/index.html: status %d, want 200 or 301", resp.StatusCode)
 	}
 }
 
