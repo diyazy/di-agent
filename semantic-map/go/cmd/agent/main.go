@@ -1,8 +1,13 @@
 // Command agent is the edge-minimal Semantic Map daemon.
 //
 // It loads the configured profile, seeds the graph from Di-Select priors,
-// and serves the three agent queries over HTTP/JSON on :8080.
-// Telemetry is accepted via POST /ingest.
+// and serves the agent queries plus the graph control surface over
+// HTTP/JSON on :8080. Telemetry is accepted via POST /ingest. The graph
+// introspection (/graph, /edges, /history, /constructs, /propositions,
+// /neighbors), ontology mutation (/ontology/*), candidate review
+// (/candidates/{id}/{confirm,reject,defer}), edge reset (/agent/reset),
+// and operator meta (/healthz, /version, /ui/) routes are wired by
+// registerRoutes in routes.go.
 //
 // Usage:
 //
@@ -15,7 +20,6 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"log"
 	"net/http"
@@ -24,9 +28,15 @@ import (
 	"syscall"
 
 	"github.com/DiyazY/di-agent/pkg/profiles"
-	"github.com/DiyazY/di-agent/pkg/semmap"
-	"github.com/DiyazY/di-agent/pkg/types"
 )
+
+// Version is the daemon's reported semver. Returned by GET /version.
+// Phase 1 ships 0.1.0 (HTTP expansion). Bump for future control-surface work.
+const Version = "0.1.0"
+
+// BuildCommit is the short git SHA the binary was built from. Empty when the
+// binary is built without `-ldflags "-X main.BuildCommit=…"`.
+var BuildCommit = ""
 
 func main() {
 	profileName  := flag.String("profile", "edge-minimal", "deployment profile")
@@ -68,87 +78,4 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	log.Println("shutting down")
-}
-
-func registerRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
-	// POST /ingest  {"from_id":"SC","to_id":"RC","observation":0.7,"event_id":"evt-1"}
-	mux.HandleFunc("POST /ingest", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			FromID      string  `json:"from_id"`
-			ToID        string  `json:"to_id"`
-			Observation float64 `json:"observation"`
-			EventID     string  `json:"event_id"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := sm.Ingest(req.FromID, req.ToID, req.Observation, req.EventID); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	})
-
-	// GET /cost?task=pod-scheduling&node=node_1
-	mux.HandleFunc("GET /cost", func(w http.ResponseWriter, r *http.Request) {
-		task := r.URL.Query().Get("task")
-		node := r.URL.Query().Get("node")
-		result, err := sm.CostOfAction(task, node)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, result)
-	})
-
-	// POST /recommend  {"task_type":"...","source_node_id":"...","data_size_bytes":1024,"latency_budget_ms":500}
-	mux.HandleFunc("POST /recommend", func(w http.ResponseWriter, r *http.Request) {
-		var ctx types.OffloadContext
-		if err := json.NewDecoder(r.Body).Decode(&ctx); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		result, err := sm.RecommendPeer(&ctx)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, result)
-	})
-
-	// POST /simulate  {"context":{...},"target_node_id":"node_2"}
-	mux.HandleFunc("POST /simulate", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Context      types.OffloadContext `json:"context"`
-			TargetNodeID string               `json:"target_node_id"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		result, err := sm.SimulateOutcome(&req.Context, req.TargetNodeID)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, result)
-	})
-
-	// GET /candidates  — pending graph extension proposals
-	mux.HandleFunc("GET /candidates", func(w http.ResponseWriter, r *http.Request) {
-		candidates, err := sm.PendingCandidates()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, candidates)
-	})
-}
-
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(v); err != nil {
-		log.Printf("writeJSON error: %v", err)
-	}
 }
