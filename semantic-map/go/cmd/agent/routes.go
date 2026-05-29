@@ -1,5 +1,39 @@
 package main
 
+// HTTP surface served by the agent daemon.
+//
+// Endpoint                          Method  Body / Path                    Status on success
+// ─────────────────────────────────────────────────────────────────────────────────────────
+// /ingest                           POST    {from_id,to_id,observation,…}  204
+// /cost                             GET     ?task=&node=                   200 ActionCost
+// /recommend                        POST    OffloadContext                 200 PeerRecommendation
+// /simulate                         POST    {context,target_node_id}       200 OutcomeSimulation
+// /candidates                       GET     —                              200 []CandidateEdge
+// ─────────────────────────────────────────────────────────────────────────────────────────
+// /graph                            GET     —                              200 GraphSnapshot
+// /edges                            GET     ?from=&to=                     200 []EdgeDTO
+// /constructs                       GET     —                              200 []ConstructDTO
+// /propositions                     GET     —                              200 []PropositionDTO
+// /history                          GET     ?since=                        200 []OntologyEventDTO
+// /neighbors                        GET     ?node=                         200 []string
+// /healthz                          GET     —                              200 HealthResponse
+// /version                          GET     —                              200 VersionResponse
+// /ontology/strength                POST    SetStrengthRequest             204
+// /ontology/deprecate               POST    DeprecateRequest               204
+// /ontology/construct               POST    AddConstructRequest            204
+// /ontology/proposition             POST    AddPropositionRequest          204
+// /agent/reset                      POST    ResetRequest                   204
+// /candidates/{id}/confirm          POST    —                              204
+// /candidates/{id}/reject           POST    —                              204
+// /candidates/{id}/defer            POST    —                              204
+// /ui/...                           GET     —                              200 (embedded HTML)
+//
+// Endpoints above the divider are pre-existing and keep their original
+// plain-text http.Error format. Endpoints below were added in the Phase 1
+// HTTP-API expansion and emit JSON errors via writeError; their POST
+// handlers gate on requireJSON for CSRF mitigation (path-only candidate
+// endpoints excepted).
+
 import (
 	"encoding/json"
 	"errors"
