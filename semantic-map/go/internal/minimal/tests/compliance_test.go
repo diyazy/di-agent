@@ -63,6 +63,72 @@ func TestDisabledProposerCompliance(t *testing.T) {
 	})
 }
 
+// TestReasonerSkipsDeprecatedPropositions verifies the live-ontology
+// behavior end-to-end: when the Ontology deprecates a proposition, the
+// Reasoner must exclude its edge from cost computation. The graph path
+// length drops by one, and the underlying edge stays in storage (preserved
+// for audit / replay).
+func TestReasonerSkipsDeprecatedPropositions(t *testing.T) {
+	s := minimal.NewInMemoryStorage()
+	o := minimal.NewStaticDiSelectOntology()
+	seedReasonerState(t, s, o)
+	r := minimal.NewRuleEngineReasoner(s, o, 0.5)
+
+	before, err := r.CostOfAction("pod-scheduling", "node_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before.GraphPathUsed) == 0 {
+		t.Fatal("expected non-empty graph path before deprecation")
+	}
+
+	// Deprecate one proposition (P1: SC→RC positive — the first one in
+	// diSelectPropositions order).
+	if err := o.Deprecate("P1", "spurious in this deployment"); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := r.CostOfAction("pod-scheduling", "node_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.GraphPathUsed) != len(before.GraphPathUsed)-1 {
+		t.Errorf("graph path should shrink by 1 after deprecation; got %d → %d",
+			len(before.GraphPathUsed), len(after.GraphPathUsed))
+	}
+	for _, entry := range after.GraphPathUsed {
+		if contains(entry, "[P1]") {
+			t.Errorf("deprecated proposition P1 still appears in graph path: %q", entry)
+		}
+	}
+
+	// The edge must still be in storage — soft-delete, not removal.
+	edges, _ := s.AllEdges()
+	stillPresent := false
+	for _, e := range edges {
+		if e.PropositionID == "P1" {
+			stillPresent = true
+			break
+		}
+	}
+	if !stillPresent {
+		t.Error("deprecated proposition's edge was removed from storage — soft-delete must preserve it")
+	}
+}
+
+// contains is a small helper to avoid importing "strings" just for one use.
+func contains(haystack, needle string) bool {
+	if len(needle) == 0 {
+		return true
+	}
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if haystack[i:i+len(needle)] == needle {
+			return true
+		}
+	}
+	return false
+}
+
 // seedReasonerState seeds storage with one node per construct and one edge per
 // proposition, mirroring what profiles.seedFromOntology does at daemon startup.
 // Without seeding, the reasoner has nothing to traverse and GraphPathUsed

@@ -32,14 +32,22 @@ func NewRuleEngineReasoner(
 	return &RuleEngineReasoner{storage, ontology, minTrustScore}
 }
 
-// CostOfAction walks every edge in storage and accumulates the contribution
-// of each to the agent's cost estimate. Iterating edges (not propositions) is
-// the multigraph-correct read path: conflict pairs (e.g. P2 negative and P3
-// positive on RC→PS) contribute independently with their own EMA-tracked
-// magnitudes and proposition-fixed signs. The earlier proposition-driven
-// implementation called GetEdge(p.From, p.To) per proposition and conflated
-// conflict pairs onto a single descriptor.
+// CostOfAction walks every non-deprecated edge in storage and accumulates the
+// contribution of each to the agent's cost estimate. Iterating edges (not
+// propositions) is the multigraph-correct read path: conflict pairs (e.g. P2
+// negative and P3 positive on RC→PS) contribute independently with their own
+// EMA-tracked magnitudes and proposition-fixed signs.
+//
+// Deprecated propositions are filtered out via a one-time lookup against the
+// Ontology before edge iteration begins. The Ontology is the source of truth
+// for what is endorsed; Storage holds descriptors regardless of endorsement
+// status so the audit trail is preserved.
 func (r *RuleEngineReasoner) CostOfAction(taskType, nodeID string) (*types.ActionCost, error) {
+	deprecated, err := r.deprecatedPropositionSet()
+	if err != nil {
+		return nil, err
+	}
+
 	edges, err := r.storage.AllEdges()
 	if err != nil {
 		return nil, err
@@ -47,13 +55,18 @@ func (r *RuleEngineReasoner) CostOfAction(taskType, nodeID string) (*types.Actio
 
 	var cpuCost, energyCost, latency float64
 	var confidenceSum float64
+	var counted int
 	var path []string
 
 	for _, e := range edges {
+		if deprecated[e.PropositionID] {
+			continue
+		}
 		effective := blend(e)
 		path = append(path, fmt.Sprintf("%s→%s[%s](%.2f)",
 			e.FromID, e.ToID, e.PropositionID, effective))
 		confidenceSum += e.Confidence
+		counted++
 
 		switch e.ToID {
 		case "RC":
@@ -64,8 +77,8 @@ func (r *RuleEngineReasoner) CostOfAction(taskType, nodeID string) (*types.Actio
 	}
 
 	var confidence float64
-	if len(edges) > 0 {
-		confidence = confidenceSum / float64(len(edges))
+	if counted > 0 {
+		confidence = confidenceSum / float64(counted)
 	}
 	cpuCost = latency * 0.1 // lightweight proxy; replaced by P4 prior initialization
 
@@ -77,6 +90,23 @@ func (r *RuleEngineReasoner) CostOfAction(taskType, nodeID string) (*types.Actio
 		Rationale:       fmt.Sprintf("task=%s node=%s path=[%s]", taskType, nodeID, strings.Join(path, ", ")),
 		GraphPathUsed:   path,
 	}, nil
+}
+
+// deprecatedPropositionSet returns the set of PropositionIDs that the
+// Ontology no longer endorses. Read once per CostOfAction call to keep the
+// hot loop simple.
+func (r *RuleEngineReasoner) deprecatedPropositionSet() (map[string]bool, error) {
+	props, err := r.ontology.Propositions()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool)
+	for _, p := range props {
+		if p.Deprecated {
+			out[p.PropositionID] = true
+		}
+	}
+	return out, nil
 }
 
 func (r *RuleEngineReasoner) RecommendPeer(ctx *types.OffloadContext) (*types.PeerRecommendation, error) {

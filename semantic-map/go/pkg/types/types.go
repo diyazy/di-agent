@@ -2,6 +2,8 @@
 // No contract implementation may define its own wire types — all must use these.
 package types
 
+import "time"
+
 // Direction encodes the sign of a proposition edge.
 type Direction int
 
@@ -53,12 +55,18 @@ type Construct struct {
 }
 
 type Proposition struct {
-	PropositionID  string
-	FromConstruct  string
-	ToConstruct    string
-	Direction      Direction
-	PriorStrength  float64
+	PropositionID   string
+	FromConstruct   string
+	ToConstruct     string
+	Direction       Direction
+	PriorStrength   float64
 	EvidenceSources []string // e.g. ["P1", "P4"]
+	// Deprecated marks a proposition that the ontology no longer endorses but
+	// is preserved in-place (history/replay). Reasoners must skip deprecated
+	// propositions during cost computation. Deprecation is a soft-delete:
+	// existing propositions are never structurally removed.
+	Deprecated       bool
+	DeprecatedReason string
 }
 
 type ValidationResult struct {
@@ -166,4 +174,41 @@ type CandidateEdge struct {
 	NObservations   int
 	DeploymentsSeen int
 	Status          CandidateStatus
+}
+
+// ── Ontology event log ────────────────────────────────────────────────────────
+//
+// The ontology is a live data structure: priors get recalibrated as new
+// empirical evidence arrives, the Proposer discovers new propositions, and
+// operators may deprecate stale claims. Every mutation emits an OntologyEvent
+// so the agent can answer "why is this edge weight what it is?" at any point
+// in time. The event log is append-only — entries are never modified or
+// removed. Edge-minimal implementations keep the log in memory (ephemeral
+// across restarts); richer profiles persist it.
+
+// OntologyEventKind classifies what changed in the ontology.
+type OntologyEventKind string
+
+const (
+	EventConstructAdded         OntologyEventKind = "construct_added"
+	EventPropositionAdded       OntologyEventKind = "proposition_added"
+	EventPropositionStrengthSet OntologyEventKind = "proposition_strength_set"
+	EventPropositionDeprecated  OntologyEventKind = "proposition_deprecated"
+)
+
+// OntologyEvent is one entry in the ontology audit log.
+//
+// TargetID is the affected construct_id or proposition_id, depending on Kind.
+// Detail carries structured context relevant to the event:
+//
+//	EventConstructAdded         -> {"name": ..., "description": ...}
+//	EventPropositionAdded       -> {"from": ..., "to": ..., "direction": ..., "prior_strength": ...}
+//	EventPropositionStrengthSet -> {"strength_old": ..., "strength_new": ...}
+//	EventPropositionDeprecated  -> {"reason": ...}
+type OntologyEvent struct {
+	Timestamp time.Time
+	Actor     string         // "system", "operator:alice", "proposer", "prior_init_pipeline", …
+	Kind      OntologyEventKind
+	TargetID  string
+	Detail    map[string]any
 }

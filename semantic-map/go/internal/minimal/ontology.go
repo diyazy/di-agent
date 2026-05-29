@@ -3,18 +3,27 @@ package minimal
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
 // StaticDiSelectOntology is the edge-minimal OntologyContract implementation.
 // The 7 constructs and 15 propositions from Di-Select are hardcoded as the
-// bootstrap minimum. Additional validated propositions can be added at runtime
-// via AddValidatedProposition; they do not persist across restarts.
+// bootstrap minimum. The ontology is live — constructs and propositions may
+// be added, prior strengths recalibrated, and propositions deprecated at
+// runtime. Mutations append to an in-memory audit log readable via
+// GetHistory. The log is ephemeral on this profile (lost on restart); the
+// cloud-full profile persists it.
 type StaticDiSelectOntology struct {
-	mu          sync.RWMutex
-	constructs  []*types.Construct
+	mu           sync.RWMutex
+	constructs   []*types.Construct
 	propositions []*types.Proposition
+	events       []*types.OntologyEvent
+
+	// now overrides time.Now for deterministic testing. Production callers
+	// leave it nil and the implementation uses the wall clock.
+	now func() time.Time
 }
 
 func NewStaticDiSelectOntology() *StaticDiSelectOntology {
@@ -22,6 +31,27 @@ func NewStaticDiSelectOntology() *StaticDiSelectOntology {
 		constructs:   diSelectConstructs(),
 		propositions: diSelectPropositions(),
 	}
+}
+
+// appendEvent records one mutation in the audit log. Callers hold o.mu.
+// actor defaults to "system" when the parameter is empty.
+func (o *StaticDiSelectOntology) appendEvent(actor string, kind types.OntologyEventKind, targetID string, detail map[string]any) {
+	if actor == "" {
+		actor = "system"
+	}
+	var ts time.Time
+	if o.now != nil {
+		ts = o.now()
+	} else {
+		ts = time.Now().UTC()
+	}
+	o.events = append(o.events, &types.OntologyEvent{
+		Timestamp: ts,
+		Actor:     actor,
+		Kind:      kind,
+		TargetID:  targetID,
+		Detail:    detail,
+	})
 }
 
 // Constructs returns a defensive copy of the construct list. Callers may mutate
@@ -72,20 +102,101 @@ func (o *StaticDiSelectOntology) Relationships(constructID string) ([]*types.Pro
 	return out, nil
 }
 
-// SetPropositionStrength updates the PriorStrength of an existing proposition.
-// This is the safe way to apply calibrated values from prior_weights.json
-// without mutating pointers returned by Propositions(). Returns an error if
-// the proposition ID is not found.
+// SetPropositionStrength updates the PriorStrength of an existing proposition
+// and appends an EventPropositionStrengthSet entry to the history. This is the
+// safe write path used by the prior initialization pipeline and by operator
+// tuning — pointer mutation through Propositions() is not supported because
+// that method returns defensive copies.
+//
+// Returns an error if the proposition ID is not found.
 func (o *StaticDiSelectOntology) SetPropositionStrength(propositionID string, strength float64) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	for _, p := range o.propositions {
 		if p.PropositionID == propositionID {
+			old := p.PriorStrength
 			p.PriorStrength = strength
+			o.appendEvent("system", types.EventPropositionStrengthSet, propositionID, map[string]any{
+				"strength_old": old,
+				"strength_new": strength,
+			})
 			return nil
 		}
 	}
 	return fmt.Errorf("proposition %q not found", propositionID)
+}
+
+// AddConstruct appends a new construct to the ontology. Constructs are
+// append-only — there is no removal path because constructs are domain-stable
+// per the architecture. Duplicate ConstructIDs are rejected.
+func (o *StaticDiSelectOntology) AddConstruct(c *types.Construct) error {
+	if c == nil || c.ConstructID == "" {
+		return fmt.Errorf("AddConstruct: nil construct or empty ConstructID")
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for _, existing := range o.constructs {
+		if existing.ConstructID == c.ConstructID {
+			return fmt.Errorf("AddConstruct: ConstructID %q already exists", c.ConstructID)
+		}
+	}
+	cp := *c
+	o.constructs = append(o.constructs, &cp)
+	o.appendEvent("system", types.EventConstructAdded, cp.ConstructID, map[string]any{
+		"name":        cp.Name,
+		"description": cp.Description,
+	})
+	return nil
+}
+
+// Deprecate marks a proposition as no-longer-endorsed. The proposition stays
+// in the ontology (visible to GetHistory replay and to clients that walk the
+// full backbone) but Reasoners must skip it during cost computation.
+// Idempotent: calling Deprecate twice on the same proposition is a no-op on
+// the second call (no duplicate event, no error).
+//
+// Returns an error if the proposition ID is not found.
+func (o *StaticDiSelectOntology) Deprecate(propositionID, reason string) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for _, p := range o.propositions {
+		if p.PropositionID == propositionID {
+			if p.Deprecated {
+				return nil // idempotent
+			}
+			p.Deprecated = true
+			p.DeprecatedReason = reason
+			o.appendEvent("system", types.EventPropositionDeprecated, propositionID, map[string]any{
+				"reason": reason,
+			})
+			return nil
+		}
+	}
+	return fmt.Errorf("proposition %q not found", propositionID)
+}
+
+// GetHistory returns ontology mutation events appended at or after `since`,
+// in chronological insertion order. Pass a zero time.Time to retrieve the
+// full log. The returned slice is a defensive copy; mutating it does not
+// affect the ontology's internal log.
+func (o *StaticDiSelectOntology) GetHistory(since time.Time) ([]*types.OntologyEvent, error) {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	out := make([]*types.OntologyEvent, 0, len(o.events))
+	for _, e := range o.events {
+		if !since.IsZero() && e.Timestamp.Before(since) {
+			continue
+		}
+		cp := *e
+		if len(e.Detail) > 0 {
+			cp.Detail = make(map[string]any, len(e.Detail))
+			for k, v := range e.Detail {
+				cp.Detail[k] = v
+			}
+		}
+		out = append(out, &cp)
+	}
+	return out, nil
 }
 
 func (o *StaticDiSelectOntology) ValidateProposition(fromID, toID string, dir types.Direction) (*types.ValidationResult, error) {
@@ -102,6 +213,9 @@ func (o *StaticDiSelectOntology) ValidateProposition(fromID, toID string, dir ty
 }
 
 func (o *StaticDiSelectOntology) AddValidatedProposition(p *types.Proposition) error {
+	if p == nil || p.PropositionID == "" {
+		return fmt.Errorf("AddValidatedProposition: nil proposition or empty PropositionID")
+	}
 	res, err := o.ValidateProposition(p.FromConstruct, p.ToConstruct, p.Direction)
 	if err != nil {
 		return err
@@ -111,7 +225,19 @@ func (o *StaticDiSelectOntology) AddValidatedProposition(p *types.Proposition) e
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.propositions = append(o.propositions, p)
+	// Defensive copy: the ontology owns its proposition entries; the caller
+	// must not be able to mutate them via their original pointer.
+	cp := *p
+	if len(p.EvidenceSources) > 0 {
+		cp.EvidenceSources = append([]string(nil), p.EvidenceSources...)
+	}
+	o.propositions = append(o.propositions, &cp)
+	o.appendEvent("system", types.EventPropositionAdded, cp.PropositionID, map[string]any{
+		"from":           cp.FromConstruct,
+		"to":             cp.ToConstruct,
+		"direction":      cp.Direction,
+		"prior_strength": cp.PriorStrength,
+	})
 	return nil
 }
 

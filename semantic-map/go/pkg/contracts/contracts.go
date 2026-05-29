@@ -5,7 +5,11 @@
 // github.com/DiyazY/di-agent/compliance.
 package contracts
 
-import "github.com/DiyazY/di-agent/pkg/types"
+import (
+	"time"
+
+	"github.com/DiyazY/di-agent/pkg/types"
+)
 
 // ── Storage ───────────────────────────────────────────────────────────────────
 
@@ -37,20 +41,49 @@ type StorageContract interface {
 
 // ── Ontology ──────────────────────────────────────────────────────────────────
 
-// OntologyContract answers structural questions about constructs and propositions.
+// OntologyContract answers structural questions about constructs and
+// propositions and supports the live-ontology lifecycle: priors get
+// recalibrated, the Proposer discovers new propositions, operators deprecate
+// stale ones, and new domains may add constructs.
 //
 // Guarantees:
-//   - Bootstrap minimum: always returns at least the 7 Di-Select constructs
-//     and 15 propositions, regardless of runtime extensions.
-//   - Immutability: existing validated propositions are never removed or reversed.
-//   - Pure query: ValidateProposition never modifies state.
+//   - Bootstrap minimum: Constructs() returns ≥7 (Di-Select baseline) and
+//     Propositions() returns ≥15 (P1–P15), regardless of runtime extensions.
+//   - Soft-delete only: existing propositions are never structurally removed
+//     and their Direction never reverses. Deprecate marks a proposition as
+//     no-longer-endorsed but keeps it in Propositions() for history/replay.
+//     Reasoners must skip deprecated propositions during cost computation.
+//   - Append-only constructs: AddConstruct is supported but constructs are
+//     never removed (they are domain-stable per the architecture).
+//   - Pure query: ValidateProposition, Constructs, Propositions,
+//     Relationships, GetHistory never modify state.
+//   - Audit log: every mutation (SetPropositionStrength,
+//     AddValidatedProposition, AddConstruct, Deprecate) appends one
+//     OntologyEvent that GetHistory exposes in chronological insertion order.
+//   - Implementations that intentionally do not support a mutation (e.g. a
+//     truly static cloud-cache implementation) return ErrNotImplemented
+//     from that method rather than silently succeeding.
 type OntologyContract interface {
+	// Read surface.
 	Constructs() ([]*types.Construct, error)
 	Propositions() ([]*types.Proposition, error)
 	Relationships(constructID string) ([]*types.Proposition, error)
 	ValidateProposition(fromID, toID string, dir types.Direction) (*types.ValidationResult, error)
+
+	// Write surface — the "live" mutations. Each emits one OntologyEvent.
 	AddValidatedProposition(p *types.Proposition) error
+	SetPropositionStrength(propositionID string, strength float64) error
+	AddConstruct(c *types.Construct) error
+	Deprecate(propositionID, reason string) error
+
+	// Audit. Returns events appended at or after `since`; pass zero time to
+	// retrieve the full history. Order is chronological by insertion.
+	GetHistory(since time.Time) ([]*types.OntologyEvent, error)
 }
+
+// ErrNotImplemented is returned by an OntologyContract implementation that
+// intentionally does not support a particular mutation in its profile.
+var ErrNotImplemented = contractError("operation not implemented by this ontology profile")
 
 // ── Updater ───────────────────────────────────────────────────────────────────
 
