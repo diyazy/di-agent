@@ -117,22 +117,54 @@ semantic-map/
     ├── internal/               Implementation packages — not importable externally
     │   └── minimal/            edge-minimal profile implementations
     │       ├── collector_cgroup.go  CgroupCollector  (cgroups v2, no daemon)
-    │       ├── storage.go      InMemoryStorage        (sync.RWMutex maps)
-    │       ├── ontology.go     StaticDiSelectOntology (7 constructs + P1–P15)
-    │       ├── updater.go      EMAUpdater             (idempotency, reset)
-    │       ├── reasoner.go     RuleEngineReasoner     (deterministic, blended)
+    │       ├── storage.go      InMemoryStorage        (multigraph, keyed by from→to:propID)
+    │       ├── ontology.go     StaticDiSelectOntology (7 constructs + P1–P15; live audit log)
+    │       ├── updater.go      EMAUpdater             (idempotency, reset; multigraph-aware)
+    │       ├── reasoner.go     RuleEngineReasoner     (deterministic, blended, skips deprecated)
     │       ├── proposer.go     DisabledProposer       (no-op)
     │       └── tests/
-    │           └── compliance_test.go   Runs all Go compliance suites
+    │           ├── compliance_test.go   Runs all Go compliance suites
+    │           └── scenarios_test.go    End-to-end narrated scenarios (ColdStart, Convergence,
+    │                                    PerKDDecisionsDiffer, DeprecationShrinksGraph,
+    │                                    IdempotentReplay, AuditTrailRecordsEverything)
     │
-    ├── compliance/             Go compliance test suites
+    ├── compliance/             Go compliance test suites — one per contract
     │   ├── collector.go        RunCollectorCompliance(t, factory)
-    │   ├── storage.go          RunStorageCompliance(t, factory)
-    │   └── updater.go          RunUpdaterCompliance(t, factory)
+    │   ├── storage.go          RunStorageCompliance(t, factory)   — multigraph guarantees
+    │   ├── updater.go          RunUpdaterCompliance(t, factory)   — per-edge idempotency
+    │   ├── ontology.go         RunOntologyCompliance(t, factory)  — live mutations + audit
+    │   ├── reasoner.go         RunReasonerCompliance(t, factory)
+    │   └── proposer.go         RunProposerCompliance(t, factory)
     │
-    └── cmd/agent/              Daemon entry point
-        └── main.go             HTTP server: /ingest /cost /recommend /simulate /candidates
+    ├── pkg/profiles/
+    │   └── profiles_test.go    Numerical verification: per-KD prior seeding from prior_weights.json
+    │
+    ├── cmd/agent/              Daemon binary
+    │   ├── main.go             Flag parsing + profile build + ListenAndServe
+    │   ├── routes.go           registerRoutes + writeError + requireJSON (CSRF guard)
+    │   ├── dto.go              Named JSON DTOs (Direction serialized as "+"/"-")
+    │   ├── static.go           //go:embed all:static + staticHandler()
+    │   ├── routes_test.go      HTTP integration tests via httptest.NewServer
+    │   └── static/             Embedded web UI assets
+    │       ├── index.html      Cytoscape mount + side panel + <dialog> modal + toast region
+    │       ├── app.js          Vanilla-JS controller; fetches /graph; POSTs mutations
+    │       └── style.css       Edge color by direction, opacity by confidence, dashed when deprecated
+    │
+    └── cmd/mapctl/             CLI binary — cobra + tablewriter; speaks the daemon's HTTP API
+        ├── main.go             cmd.Execute()
+        ├── cmd/                One file per subcommand (graph, edges, history, strength,
+        │                       deprecate, construct, proposition, reset, candidates,
+        │                       recommend, simulate, watch, dot, health, version, completion)
+        ├── client/             HTTP client + DTOs duplicated (NOT imported) from cmd/agent
+        │   ├── client.go
+        │   ├── types.go
+        │   └── client_test.go
+        └── render/             Output formatters
+            ├── table.go        tablewriter wrapper honoring --no-color
+            └── json.go         render.JSON(w, v) for --json mode
 ```
+
+For the architectural rationale behind the multigraph, live ontology, control surface, and per-layer language strategy, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 

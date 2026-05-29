@@ -10,6 +10,7 @@ Design rationale and decision record. Update this file when a contract, profile,
 - [2. Contract Architecture](#2-contract-architecture)
   - [The six contracts](#the-six-contracts)
   - [Behavioral guarantees](#behavioral-guarantees)
+  - [End-to-end validation: integration scenarios](#end-to-end-validation-integration-scenarios)
 - [3. Deployment Profiles](#3-deployment-profiles)
 - [4. Language Strategy](#4-language-strategy)
 - [5. Telemetry Pipeline](#5-telemetry-pipeline)
@@ -96,6 +97,23 @@ The Collector and Bridge live outside the SemanticMap facade — they feed it. T
 ### Behavioral guarantees
 
 Guarantees are not just signatures — they are documented pre/post-conditions on each method in the contract source files. The compliance test suites in `compliance/` verify them mechanically. **A new implementation is valid if and only if it passes the compliance suite for its contract.** This is the definition, not a check.
+
+Compliance suites exist for all six contracts (`compliance/{collector,storage,updater,ontology,reasoner,proposer}.go`). Each runs against a factory the implementation supplies, so a new storage or ontology can be validated with a single test file wired to the suite.
+
+### End-to-end validation: integration scenarios
+
+Compliance proves each part works in isolation. **Scenarios prove the parts compose** into the behaviors the architecture promises. `internal/minimal/tests/scenarios_test.go` runs six narrated end-to-end flows against the same wiring the production daemon uses; each emits `t.Logf` snapshots so `go test -v -run TestScenario` reads like a paper results section while hard assertions guard the mechanics that must not regress:
+
+| Scenario                            | Demonstrates                                                                                          |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `ColdStart`                         | 15 edges seeded, confidence=0, effective value == prior — agent defers entirely to literature         |
+| `ConvergenceOnOneEdge`              | 500 obs at fixed value: EMA drifts prior → observed, confidence climbs 0→1, effective crosses over    |
+| `PerKDDecisionsDiffer`              | Two agents with same query but different `-kd`: cost outputs diverge — the per-KD priors steer        |
+| `DeprecationShrinksGraph`           | After `Deprecate("P1")`: graph path length drops by exactly 1; storage retains the EdgeDescriptor      |
+| `IdempotentReplay`                  | 200 obs replayed with same eventIDs is a no-op; new eventIDs accumulate — idempotency is per-event    |
+| `AuditTrailRecordsEverything`       | Four ontology mutations → exactly four `OntologyEvent`s in chronological order via `GetHistory`        |
+
+A separate numerical verification (`pkg/profiles/profiles_test.go::TestPerKDSeedingMatchesPriorWeights`) confirms that for every KD in `prior_weights.json` and every one of the 15 propositions, the seeded `EdgeDescriptor.PriorWeight` matches the file to 1e-6 precision. This is the production reason to trust the `-kd` flag.
 
 ### The ontology is alive
 
