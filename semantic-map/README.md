@@ -179,19 +179,22 @@ GOOS=linux GOARCH=arm64 go build -o agent-arm64 ./cmd/agent
 scp agent-arm64 pi@192.168.1.x:/usr/local/bin/agent
 
 # Run on RPi4
-agent -profile edge-minimal -addr :8080 -alpha 0.2 -convergence 500
+agent -profile edge-minimal -addr :8080 -alpha 0.2 -convergence 500 \
+  -priors /etc/semantic-map/prior_weights.json -kd k0s
 
 # Run locally (development)
 go run ./cmd/agent -profile edge-minimal
 ```
 
-| Flag           | Default        | Description                             |
-| -------------- | -------------- | --------------------------------------- |
-| `-profile`     | `edge-minimal` | Deployment profile name                 |
-| `-addr`        | `:8080`        | HTTP listen address                     |
-| `-alpha`       | `0.2`          | EMA decay factor                        |
-| `-convergence` | `500`          | Observations until confidence = 1.0     |
-| `-min-trust`   | `0.5`          | Minimum peer trust score for offloading |
+| Flag           | Default        | Description                                                              |
+| -------------- | -------------- | ------------------------------------------------------------------------ |
+| `-profile`     | `edge-minimal` | Deployment profile name                                                  |
+| `-addr`        | `:8080`        | HTTP listen address                                                      |
+| `-alpha`       | `0.2`          | EMA decay factor                                                         |
+| `-convergence` | `500`          | Observations until confidence = 1.0                                      |
+| `-min-trust`   | `0.5`          | Minimum peer trust score for offloading                                  |
+| `-priors`      | `""`           | Path to `prior_weights.json` from the initialization pipeline            |
+| `-kd`          | `""`           | KD running on this node (`k3s`/`k0s`/`k8s`/`kubeEdge`/`openYurt`). When set together with `-priors`, the per-KD edge weights in the file seed the graph instead of the global Di-Select strengths. |
 
 ---
 
@@ -255,6 +258,24 @@ python -m semantic_map.prior_init.pipeline \
   --out prior_weights.json
 ```
 
-The pipeline reads publication constants (J/pod, mJ/op, CIS scores, overhead fractions) and writes calibrated `prior_strength` values for all 15 propositions across all 5 KDs. The agent daemon loads `prior_weights.json` at startup via `-priors` flag (to be implemented).
+The pipeline reads publication constants (J/pod, mJ/op, CIS scores, overhead fractions) and writes:
+
+- `propositions[P*].prior_strength` — one calibrated λ per proposition (global)
+- `distribution_edge_weights[kd][edge_key].prior_weight` — per-KD edge weights (5 KDs × 15 edges)
+- `distribution_construct_scores[kd][construct]` — per-KD construct scores (informational)
+
+### Loading priors at startup
+
+The daemon loads the file via `-priors`. Without `-kd`, the global proposition strengths seed every edge. With `-kd`, the per-distribution edge weights override the global values for that KD:
+
+```bash
+# Global Di-Select strengths only
+agent -priors /etc/semantic-map/prior_weights.json
+
+# Per-KD edge weights (recommended for production)
+agent -priors /etc/semantic-map/prior_weights.json -kd k0s
+```
+
+If the supplied `-kd` is not in the file's `distributions` list, the daemon refuses to start.
 
 The current `prior_weights.json` was generated on 2026-05-12. Re-run if new empirical papers are incorporated or the KD set changes.

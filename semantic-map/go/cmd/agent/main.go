@@ -7,7 +7,11 @@
 // Usage:
 //
 //	agent -profile edge-minimal -addr :8080 -alpha 0.2 -convergence 500 \
-//	      -priors /path/to/prior_weights.json
+//	      -priors /path/to/prior_weights.json -kd k0s
+//
+// The -kd flag selects per-distribution edge weights from prior_weights.json
+// when set. Omit it (or pass an empty string) to use the global Di-Select
+// proposition strengths.
 package main
 
 import (
@@ -31,6 +35,8 @@ func main() {
 	convergence  := flag.Float64("convergence", 500, "observations for confidence=1.0")
 	minTrust     := flag.Float64("min-trust", 0.5, "minimum peer trust score")
 	priorsPath   := flag.String("priors", "", "path to prior_weights.json from initialization pipeline")
+	kd           := flag.String("kd", "", "Kubernetes distribution running on this node "+
+		"(k3s|k0s|k8s|kubeEdge|openYurt); selects per-KD edge weights from -priors when set")
 	flag.Parse()
 
 	cfg := profiles.Config{
@@ -38,6 +44,7 @@ func main() {
 		ConvergenceThreshold: *convergence,
 		MinTrustScore:        *minTrust,
 		PriorWeightsPath:     *priorsPath,
+		KD:                   *kd,
 	}
 
 	sm, err := profiles.Build(*profileName, cfg)

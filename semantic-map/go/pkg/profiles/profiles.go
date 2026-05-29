@@ -31,6 +31,13 @@ type Config struct {
 	// proposition PriorStrength values loaded from the file override the
 	// hardcoded Di-Select defaults.  Empty string = use hardcoded defaults.
 	PriorWeightsPath string
+
+	// KD is the Kubernetes distribution this agent is running on (e.g.
+	// "k3s", "k0s", "k8s", "kubeEdge", "openYurt"). When set together with
+	// PriorWeightsPath, the per-distribution edge weights from the file are
+	// used to seed storage instead of the global proposition strengths.
+	// Empty string = no per-distribution adjustment (global priors used).
+	KD string
 }
 
 func DefaultConfig() Config {
@@ -39,22 +46,37 @@ func DefaultConfig() Config {
 		ConvergenceThreshold: 500,
 		MinTrustScore:        0.5,
 		PriorWeightsPath:     "",
+		KD:                   "",
 	}
 }
 
 // ── prior_weights.json schema ─────────────────────────────────────────────────
 
-// priorWeightsFile mirrors the top-level structure of prior_weights.json.
+// priorWeightsFile mirrors the top-level structure of prior_weights.json
+// produced by semantic_map.prior_init.pipeline.
 type priorWeightsFile struct {
-	Version      string                       `json:"version"`
-	GeneratedAt  string                       `json:"generated_at"`
-	Propositions map[string]propositionPrior  `json:"propositions"`
+	Version                  string                                `json:"version"`
+	GeneratedAt              string                                `json:"generated_at"`
+	Distributions            []string                              `json:"distributions"`
+	Propositions             map[string]propositionPrior           `json:"propositions"`
+	DistributionEdgeWeights  map[string]map[string]edgePrior       `json:"distribution_edge_weights"`
 }
 
 type propositionPrior struct {
 	PriorStrength float64 `json:"prior_strength"`
 	Direction     string  `json:"direction"`
 	Method        string  `json:"method"`
+}
+
+// edgePrior is one entry in distribution_edge_weights[kd][edge_key].
+// edge_key has the form "fromID→toID:propositionID".
+type edgePrior struct {
+	FromID        string  `json:"from_id"`
+	ToID          string  `json:"to_id"`
+	PropositionID string  `json:"proposition_id"`
+	Direction     string  `json:"direction"`
+	PriorWeight   float64 `json:"prior_weight"`
+	EMAWeight     float64 `json:"ema_weight"`
 }
 
 // loadPriorWeights reads prior_weights.json from the given path.
@@ -82,12 +104,30 @@ func Build(profileName string, cfg Config) (*semmap.SemanticMap, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := validateKD(pw, cfg.KD); err != nil {
+		return nil, err
+	}
 	switch profileName {
 	case "edge-minimal":
 		return buildEdgeMinimal(cfg, pw), nil
 	default:
 		return nil, fmt.Errorf("unknown profile %q", profileName)
 	}
+}
+
+// validateKD checks that the configured KD is one of the distributions the
+// prior_weights.json file knows about. An empty KD is always allowed (means
+// "use global priors, no per-distribution adjustment").
+func validateKD(pw *priorWeightsFile, kd string) error {
+	if kd == "" || pw == nil || len(pw.Distributions) == 0 {
+		return nil
+	}
+	for _, d := range pw.Distributions {
+		if d == kd {
+			return nil
+		}
+	}
+	return fmt.Errorf("KD %q not found in prior_weights.json distributions %v", kd, pw.Distributions)
 }
 
 func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) *semmap.SemanticMap {
@@ -97,31 +137,41 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) *semmap.SemanticMap {
 	reasoner := minimal.NewRuleEngineReasoner(storage, ontology, cfg.MinTrustScore)
 	proposer := minimal.NewDisabledProposer()
 
-	// Apply calibrated priors from pipeline output before seeding storage.
+	// Apply calibrated proposition strengths from the pipeline before seeding
+	// storage. Per-KD edge weights (if any) are applied during seeding.
 	if pw != nil {
 		applyPriorWeights(ontology, pw)
 	}
 
-	seedFromOntology(storage, ontology)
+	seedFromOntology(storage, ontology, pw, cfg.KD)
 
 	return semmap.New(storage, ontology, updater, reasoner, proposer)
 }
 
-// applyPriorWeights overwrites the proposition PriorStrength values in the
-// ontology with those from prior_weights.json.  Unknown proposition IDs are
-// silently ignored so old files remain compatible with new code.
+// applyPriorWeights overwrites proposition PriorStrength values in the ontology
+// with those from prior_weights.json via the ontology's safe setter (locks
+// internally, does not mutate pointers returned by Propositions()). Unknown
+// proposition IDs are silently ignored so old files remain compatible with
+// new code.
 func applyPriorWeights(ontology *minimal.StaticDiSelectOntology, pw *priorWeightsFile) {
-	props, _ := ontology.Propositions()
-	for _, p := range props {
-		if entry, ok := pw.Propositions[p.PropositionID]; ok {
-			p.PriorStrength = entry.PriorStrength
-		}
+	for propID, entry := range pw.Propositions {
+		_ = ontology.SetPropositionStrength(propID, entry.PriorStrength)
 	}
 }
 
 // seedFromOntology pre-populates storage with one node per construct and one
-// edge per proposition, using Di-Select prior strengths as the initial values.
-func seedFromOntology(storage *minimal.InMemoryStorage, ontology *minimal.StaticDiSelectOntology) {
+// edge per proposition. Edge prior_weight selection precedence:
+//
+//  1. pw.DistributionEdgeWeights[cfg.KD][edgeKey] (per-KD calibrated, if both KD
+//     and the file are provided);
+//  2. proposition PriorStrength from the ontology (which may have been
+//     overwritten by applyPriorWeights from the global pw.Propositions table).
+func seedFromOntology(
+	storage *minimal.InMemoryStorage,
+	ontology *minimal.StaticDiSelectOntology,
+	pw *priorWeightsFile,
+	kd string,
+) {
 	constructs, _ := ontology.Constructs()
 	for _, c := range constructs {
 		_ = storage.PutNode(&types.NodeDescriptor{
@@ -134,17 +184,38 @@ func seedFromOntology(storage *minimal.InMemoryStorage, ontology *minimal.Static
 		})
 	}
 
+	perKD := perKDEdgeWeights(pw, kd)
+
 	propositions, _ := ontology.Propositions()
 	for _, p := range propositions {
+		prior := p.PriorStrength
+		if e, ok := perKD[edgeKey(p.FromConstruct, p.ToConstruct, p.PropositionID)]; ok {
+			prior = e.PriorWeight
+		}
 		_ = storage.PutEdge(&types.EdgeDescriptor{
 			FromID:        p.FromConstruct,
 			ToID:          p.ToConstruct,
 			PropositionID: p.PropositionID,
 			Direction:     p.Direction,
-			PriorWeight:   p.PriorStrength,
-			EMAWeight:     p.PriorStrength, // starts equal to prior
+			PriorWeight:   prior,
+			EMAWeight:     prior, // starts equal to prior
 			Confidence:    0.0,
 			NObservations: 0,
 		})
 	}
+}
+
+// perKDEdgeWeights returns the per-distribution edge map for kd, or nil if not
+// applicable. Callers must handle the nil case (fall back to global priors).
+func perKDEdgeWeights(pw *priorWeightsFile, kd string) map[string]edgePrior {
+	if pw == nil || kd == "" {
+		return nil
+	}
+	return pw.DistributionEdgeWeights[kd]
+}
+
+// edgeKey mirrors the key format produced by prior_init/pipeline.py:
+// "{from_c}→{to_c}:{prop_id}".
+func edgeKey(fromID, toID, propID string) string {
+	return fmt.Sprintf("%s→%s:%s", fromID, toID, propID)
 }
