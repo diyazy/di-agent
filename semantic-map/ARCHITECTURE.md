@@ -115,6 +115,19 @@ Compliance proves each part works in isolation. **Scenarios prove the parts comp
 
 A separate numerical verification (`pkg/profiles/profiles_test.go::TestPerKDSeedingMatchesPriorWeights`) confirms that for every KD in `prior_weights.json` and every one of the 15 propositions, the seeded `EdgeDescriptor.PriorWeight` matches the file to 1e-6 precision. This is the production reason to trust the `-kd` flag.
 
+#### Evolution scenarios
+
+`internal/minimal/tests/evolution_test.go` runs six longer-form scenarios driven by the `ScriptedCollector` (§5) and, for scenario 6, the `MICorrelationProposer` (§6). Each prints checkpoint tables + an `EVOLUTION SUMMARY` block via `t.Logf` so the convergence story is reproducible from CI. Run with `go test -v -run TestEvolution ./internal/minimal/tests/...`:
+
+| Scenario                              | Demonstrates                                                                                                |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `ColdToWarmConvergence`               | Constant CPU=0.8 for 500 ticks; P2/P3/P10 EMA → 0.8, confidence 0→1, advisor flags the 6 high-Δ edges        |
+| `RegimeChange`                        | Step pattern 0.3→0.85→0.3 over 800 ticks; EMA tracks each regime, ending pulled back toward 0.3              |
+| `ConflictPairCoupling`                | P2 (RC→PS−) and P3 (RC→PS+) share EMA + confidence updates from one observation; reasoner aggregates both    |
+| `MultiConstructStress`                | Four simultaneous patterns drive RC, CO, PS; edges touching observed constructs converge, others stay prior |
+| `DeprecationFromContradiction`        | Low CO evidence pushes P5 off prior; advisor fires (|Δeff|+conf); operator deprecates; path shrinks by 1     |
+| `NewEdgeProposeConfirm`               | MI proposer detects MU↔PS correlation; operator confirms; backbone grows 15→16 (evidence: `proposer-mi`)     |
+
 ### The ontology is alive
 
 The ontology is not a static reference. Empirical priors get recalibrated as new papers land, operators deprecate claims that the deployment's evidence contradicts, and new domains may introduce new constructs. The contract therefore admits four kinds of mutation, each emitting one `OntologyEvent` to an append-only audit log:
@@ -260,11 +273,12 @@ Because `event_id` flows unchanged from Collector → Bridge → Updater, idempo
 
 ### Planned collector implementations
 
-| Plugin              | Source                           | Profile         | Status  | Available metrics                                                    |
-| ------------------- | -------------------------------- | --------------- | ------- | -------------------------------------------------------------------- |
-| `CgroupCollector`   | `/sys/fs/cgroup/`                | `edge-minimal`  | ✅ done | cpu\_utilization, memory\_utilization, cpu\_throttle\_ratio          |
-| `KubeletCollector`  | kubelet `/metrics/resource`      | `edge-standard` | planned | pod\_startup\_ms, scheduling\_latency\_ms                            |
-| `NetdataCollector`  | Netdata HTTP streaming API       | `cloud-full`    | planned | All MetricTypes + custom chart contexts                              |
+| Plugin              | Source                           | Profile                 | Status  | Available metrics                                                    |
+| ------------------- | -------------------------------- | ----------------------- | ------- | -------------------------------------------------------------------- |
+| `CgroupCollector`   | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go` | cpu\_utilization, memory\_utilization, cpu\_throttle\_ratio |
+| `ScriptedCollector` | programmable patterns (in-process) | demo / scenarios / replay | ✅ done — `internal/scripted/collector.go`     | any MetricType the patterns declare (Constant / Ramp / Step / Sine / Burst / Noisy) |
+| `KubeletCollector`  | kubelet `/metrics/resource`      | `edge-standard`         | planned | pod\_startup\_ms, scheduling\_latency\_ms                            |
+| `NetdataCollector`  | Netdata HTTP streaming API       | `cloud-full`            | planned | All MetricTypes + custom chart contexts                              |
 
 Multiple collectors can run concurrently in the same agent (e.g., `edge-standard` runs both Cgroup and Kubelet). The Bridge processes all their outputs — idempotency ensures overlapping `event_id`s from the same physical observation are harmless.
 
@@ -295,7 +309,7 @@ Reject  → Suppressed for this deployment session
 
 The Proposer **never modifies the backbone directly**. `Confirm` delegates to `OntologyContract.AddValidatedProposition`, which validates the new edge against existing propositions before accepting. A proposed edge that contradicts a validated proposition (e.g., a positive direction where a negative is already established) is rejected.
 
-The `edge-minimal` profile ships with `DisabledProposer` (no-op). Automatic extension is available from `edge-standard` upward.
+The `edge-minimal` profile ships with `DisabledProposer` (no-op) wired into the production daemon. A demonstration-grade `MICorrelationProposer` (`internal/minimal/proposer_mi.go`) lives alongside it and powers the propose-then-confirm evolution scenario (§2): it ring-buffers observation pairs, emits `CandidateEdge`s when `|Pearson r|` exceeds a threshold, and delegates `Confirm` to `AddValidatedProposition` with an evidence source tag of `proposer-mi`. The coverage check is direction-aware so conflict-pair siblings (opposite direction on the same `(from, to)`) remain reachable. Pearson stands in for true mutual information here — the name is retained for continuity with the architecture, and a richer estimator can drop in at `edge-standard`/`cloud-full` without touching the interface. Full statistical automatic extension is available from `edge-standard` upward.
 
 ---
 

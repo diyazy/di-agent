@@ -13,6 +13,7 @@ package minimal_test
 import (
 	"fmt"
 	"math"
+	"math/rand"
 	"sort"
 	"testing"
 
@@ -569,4 +570,114 @@ func TestEvolution_DeprecationFromContradiction(t *testing.T) {
 	}
 
 	printSummary(t, "deprecation", a.storage, a.ontology)
+}
+
+// ── Scenario 6: propose-then-confirm ─────────────────────────────────────────
+
+func TestEvolution_NewEdgeProposeConfirm(t *testing.T) {
+	col := scripted.New("node_1") // collector unused — the proposer is driven directly
+	ontology := minimal.NewStaticDiSelectOntology()
+	proposer := minimal.NewMICorrelationProposer(ontology, 0.8, 30, 200)
+
+	// Verify MU→PS is a free pair (no proposition in the bootstrap).
+	props, _ := ontology.Propositions()
+	for _, p := range props {
+		if p.FromConstruct == "MU" && p.ToConstruct == "PS" {
+			t.Fatalf("MU→PS is already in the bootstrap (P%s); pick another pair", p.PropositionID)
+		}
+	}
+	before := len(props)
+
+	a := newEvolutionAgent(t, col, proposer)
+	// Swap in the proposer-aware ontology so AddValidatedProposition routes
+	// through the same instance the proposer sees.
+	a.ontology = ontology
+	a.sm = semmap.New(a.storage, ontology, a.updater, minimal.NewRuleEngineReasoner(a.storage, ontology, 0.5), proposer)
+
+	t.Log("Scenario 6: propose-then-confirm.")
+	t.Log("Drive 150 strongly correlated MU↔PS observations directly to the proposer;")
+	t.Log("verify a pending candidate is emitted, confirm it, see backbone grow by 1.")
+	t.Log("")
+
+	rng := rand.New(rand.NewSource(42))
+	for tick := 0; tick < 150; tick++ {
+		base := 0.5 + 0.3*math.Sin(float64(tick)/20)
+		noise := rng.NormFloat64() * 0.03
+		valueMU := base
+		valuePS := base + noise // ~95%+ correlated
+		if err := proposer.Observe("MU", "PS", valueMU, valuePS); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cands, err := a.sm.PendingCandidates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cands) != 1 {
+		t.Fatalf("expected 1 pending candidate; got %d", len(cands))
+	}
+	cand := cands[0]
+	t.Logf("  candidate detected: %s %s→%s(%s)  |r|=%.3f  n=%d",
+		cand.CandidateID, cand.FromID, cand.ToID, directionString(cand.Direction), cand.MIScore, cand.NObservations)
+	if cand.CandidateID != "P-prop-MU-PS" {
+		t.Errorf("unexpected candidate id: %s", cand.CandidateID)
+	}
+	if cand.Direction != types.Positive {
+		t.Errorf("expected positive direction; got %v", cand.Direction)
+	}
+
+	// Confirm.
+	if err := a.sm.ConfirmCandidate(cand.CandidateID); err != nil {
+		t.Fatalf("Confirm error: %v", err)
+	}
+
+	afterProps, _ := a.sm.Propositions()
+	if len(afterProps) != before+1 {
+		t.Errorf("propositions: before=%d after=%d (expected before+1)", before, len(afterProps))
+	}
+
+	// New proposition is visible with the proposer-mi evidence tag.
+	var newProp *types.Proposition
+	for _, p := range afterProps {
+		if p.FromConstruct == "MU" && p.ToConstruct == "PS" {
+			newProp = p
+			break
+		}
+	}
+	if newProp == nil {
+		t.Fatal("could not locate new MU→PS proposition")
+	}
+	if len(newProp.EvidenceSources) != 1 || newProp.EvidenceSources[0] != "proposer-mi" {
+		t.Errorf("evidence sources should be [proposer-mi]; got %v", newProp.EvidenceSources)
+	}
+
+	// Post-confirm: no more pending candidates.
+	postCands, _ := a.sm.PendingCandidates()
+	if len(postCands) != 0 {
+		t.Errorf("expected 0 pending candidates after Confirm; got %d", len(postCands))
+	}
+
+	// History contains the candidate with Confirmed status.
+	hist, _ := proposer.GetHistory()
+	var confirmed bool
+	for _, h := range hist {
+		if h.CandidateID == cand.CandidateID && h.Status == types.Confirmed {
+			confirmed = true
+		}
+	}
+	if !confirmed {
+		t.Error("proposer history does not record the candidate as Confirmed")
+	}
+
+	t.Logf("  Confirmed → proposition added: %s %s→%s(%s) prior=%.3f",
+		newProp.PropositionID, newProp.FromConstruct, newProp.ToConstruct,
+		directionString(newProp.Direction), newProp.PriorStrength)
+	t.Logf("  Propositions: %d → %d", before, len(afterProps))
+
+	t.Logf("=== EVOLUTION SUMMARY: propose-confirm ===")
+	t.Logf("Candidates emitted:    1 (%s, |r|=%.3f, n=%d)", cand.CandidateID, cand.MIScore, cand.NObservations)
+	t.Logf("Candidates confirmed:  1")
+	t.Logf("Backbone size change:  %d → %d (+1)", before, len(afterProps))
+	t.Logf("New proposition:       %s  evidence=%v", newProp.PropositionID, newProp.EvidenceSources)
 }
