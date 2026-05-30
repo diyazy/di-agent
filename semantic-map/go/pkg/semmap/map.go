@@ -53,6 +53,19 @@ func (m *SemanticMap) Ingest(fromID, toID string, observation float64, eventID s
 	return m.proposer.Observe(fromID, toID, observation, observation)
 }
 
+// IngestSample feeds one MetricSample through the Bridge. The Bridge maps the
+// metric type to its primary construct, looks up every relationship that
+// touches that construct, and calls UpdateEdge on each unique (from, to)
+// pair. Idempotency is per-edge — replaying the same sample is a no-op.
+//
+// Returns nil even when the metric type has no mapping (forward-compat with
+// future MetricTypes). Per-edge errors are returned (first one wins) so the
+// caller can decide whether to keep looping; the Bridge itself processes
+// every reachable edge regardless of individual failures.
+func (m *SemanticMap) IngestSample(sample *types.MetricSample) error {
+	return Bridge(sample, m.ontology, m.updater)
+}
+
 // ── Graph extension ───────────────────────────────────────────────────────────
 
 func (m *SemanticMap) PendingCandidates() ([]*types.CandidateEdge, error) {
