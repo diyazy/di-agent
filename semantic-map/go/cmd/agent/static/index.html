@@ -29,8 +29,32 @@
 
     <aside id="panel">
       <section id="panel-empty" class="panel-section">
-        <p class="hint">Click an edge in the graph to inspect its descriptor and history.</p>
+        <p class="hint">Click a <strong>node</strong> to inspect the construct, or an <strong>edge</strong> for proposition descriptor + history + mutations.</p>
         <p class="hint small">Edges colored <span class="legend-pos">green</span> for positive direction, <span class="legend-neg">red</span> for negative. Dashed edges are deprecated. Opacity scales with confidence.</p>
+      </section>
+
+      <section id="panel-node" class="panel-section hidden">
+        <h2>Construct</h2>
+        <table id="node-table">
+          <tbody>
+            <tr><th>ID</th><td id="nd-id"></td></tr>
+            <tr><th>Name</th><td id="nd-name"></td></tr>
+            <tr><th>Description</th><td id="nd-desc"></td></tr>
+            <tr><th>Degree</th><td id="nd-degree"></td></tr>
+          </tbody>
+        </table>
+
+        <h2>Outgoing edges <span id="nd-out-count" class="hint small"></span></h2>
+        <ul id="nd-out-list" class="edge-link-list">
+          <li class="hint small">No outgoing propositions.</li>
+        </ul>
+
+        <h2>Incoming edges <span id="nd-in-count" class="hint small"></span></h2>
+        <ul id="nd-in-list" class="edge-link-list">
+          <li class="hint small">No incoming propositions.</li>
+        </ul>
+
+        <p class="hint small">Constructs are append-only — they have no mutation actions. Click any related edge to inspect or mutate it.</p>
       </section>
 
       <section id="panel-edge" class="panel-section hidden">

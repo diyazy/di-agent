@@ -20,7 +20,8 @@
   let cy = null;                  // cytoscape instance
   let cachedGraph = null;         // last GET /graph payload
   let cachedHistory = [];         // last GET /history payload
-  let selectedEdge = null;        // EdgeDTO currently shown in panel
+  let selectedEdge = null;        // EdgeDTO currently shown in panel (edge mode)
+  let selectedNodeID = null;      // ConstructID currently shown in panel (node mode)
   let autoRefreshHandle = null;   // setInterval id when auto-refresh is on
 
   // ── DOM refs ────────────────────────────────────────────────────────────
@@ -33,7 +34,18 @@
     autoRefresh: $('auto-refresh'),
 
     panelEmpty: $('panel-empty'),
+    panelNode:  $('panel-node'),
     panelEdge:  $('panel-edge'),
+
+    // Node-panel fields
+    ndID:       $('nd-id'),
+    ndName:     $('nd-name'),
+    ndDesc:     $('nd-desc'),
+    ndDegree:   $('nd-degree'),
+    ndOutCount: $('nd-out-count'),
+    ndOutList:  $('nd-out-list'),
+    ndInCount:  $('nd-in-count'),
+    ndInList:   $('nd-in-list'),
 
     edFrom:        $('ed-from'),
     edTo:          $('ed-to'),
@@ -251,12 +263,16 @@
         selectEdge(edge);
       });
 
+      cy.on('tap', 'node', (evt) => {
+        const id = evt.target.data('id');
+        if (!id) return;
+        selectNode(id);
+      });
+
       cy.on('tap', (evt) => {
         // Tap on background → clear selection.
         if (evt.target === cy) {
-          selectedEdge = null;
-          els.panelEdge.classList.add('hidden');
-          els.panelEmpty.classList.remove('hidden');
+          showEmptyPanel();
         }
       });
     }
@@ -269,9 +285,19 @@
     return Number(v).toFixed(digits ?? 3);
   }
 
+  function showEmptyPanel() {
+    selectedEdge = null;
+    selectedNodeID = null;
+    els.panelEdge.classList.add('hidden');
+    els.panelNode.classList.add('hidden');
+    els.panelEmpty.classList.remove('hidden');
+  }
+
   function selectEdge(edge) {
     selectedEdge = edge;
+    selectedNodeID = null;
     els.panelEmpty.classList.add('hidden');
+    els.panelNode.classList.add('hidden');
     els.panelEdge.classList.remove('hidden');
 
     els.edFrom.textContent = edge.from;
@@ -328,6 +354,78 @@
     return String(s).replace(/[&<>"']/g, (c) => ({
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
     })[c]);
+  }
+
+  // ── Node panel ──────────────────────────────────────────────────────────
+
+  // selectNode populates the side panel with a construct's descriptor and the
+  // edges that touch it. Constructs are append-only (the ontology contract
+  // forbids removal), so the panel offers no mutation actions — but every
+  // listed edge is clickable to jump into the edge panel where mutations live.
+  function selectNode(constructID) {
+    if (!cachedGraph) return;
+    const ctor = (cachedGraph.constructs || []).find((c) => c.construct_id === constructID);
+    if (!ctor) {
+      toast(`Unknown construct: ${constructID}`, 'error');
+      return;
+    }
+
+    selectedNodeID = constructID;
+    selectedEdge = null;
+    els.panelEmpty.classList.add('hidden');
+    els.panelEdge.classList.add('hidden');
+    els.panelNode.classList.remove('hidden');
+
+    els.ndID.textContent   = ctor.construct_id;
+    els.ndName.textContent = ctor.name || '—';
+    els.ndDesc.textContent = ctor.description || '—';
+
+    const edges = cachedGraph.edges || [];
+    const outgoing = edges.filter((e) => e.from === constructID);
+    const incoming = edges.filter((e) => e.to === constructID);
+    const total = outgoing.length + incoming.length;
+    els.ndDegree.textContent =
+      `${total} (${outgoing.length} out · ${incoming.length} in)`;
+
+    renderEdgeLinkList(els.ndOutList, els.ndOutCount, outgoing,
+      'No outgoing propositions.');
+    renderEdgeLinkList(els.ndInList, els.ndInCount, incoming,
+      'No incoming propositions.');
+  }
+
+  // renderEdgeLinkList fills a <ul> with clickable edge summaries. Clicking
+  // an item swaps the panel to edge mode for that proposition.
+  function renderEdgeLinkList(listEl, countEl, edges, emptyMsg) {
+    countEl.textContent = edges.length ? `(${edges.length})` : '';
+    if (!edges.length) {
+      listEl.innerHTML = `<li class="hint small">${escapeHTML(emptyMsg)}</li>`;
+      return;
+    }
+    listEl.innerHTML = '';
+    for (const e of edges) {
+      const prop = (cachedGraph.propositions || []).find(
+        (p) => p.proposition_id === e.proposition_id
+      );
+      const deprecated = !!(prop && prop.deprecated);
+      const li = document.createElement('li');
+      li.className = 'edge-link' + (deprecated ? ' edge-link-deprecated' : '');
+      const dirCls = e.direction === '-' ? 'dir-neg' : 'dir-pos';
+      li.innerHTML =
+        `<span class="edge-link-pid">${escapeHTML(e.proposition_id)}</span>` +
+        ` <span class="${dirCls}">${escapeHTML(e.direction)}</span>` +
+        ` <span class="edge-link-pair">${escapeHTML(e.from)} → ${escapeHTML(e.to)}</span>` +
+        ` <span class="edge-link-weight hint small">w=${fmtFloat(e.ema_weight, 2)} · c=${fmtFloat(e.confidence, 2)}</span>` +
+        (deprecated ? ' <span class="edge-link-flag hint small">deprecated</span>' : '');
+      li.addEventListener('click', () => {
+        selectEdge(e);
+        if (cy) {
+          cy.elements().unselect();
+          const cyEdge = cy.getElementById(e.proposition_id);
+          if (cyEdge && cyEdge.length) cyEdge.select();
+        }
+      });
+      listEl.appendChild(li);
+    }
   }
 
   // ── Modal ───────────────────────────────────────────────────────────────
@@ -440,13 +538,14 @@
         const fresh = (graph.edges || []).find(
           (e) => e.proposition_id === selectedEdge.proposition_id
         );
-        if (fresh) {
-          selectEdge(fresh);
-        } else {
-          selectedEdge = null;
-          els.panelEdge.classList.add('hidden');
-          els.panelEmpty.classList.remove('hidden');
-        }
+        if (fresh) selectEdge(fresh);
+        else showEmptyPanel();
+      } else if (selectedNodeID) {
+        const stillThere = (graph.constructs || []).some(
+          (c) => c.construct_id === selectedNodeID
+        );
+        if (stillThere) selectNode(selectedNodeID);
+        else showEmptyPanel();
       }
       await refreshHealth();
     } catch (err) {

@@ -211,6 +211,62 @@ main {
   font-size: 0.75rem;
 }
 
+/* ── Node panel — clickable edge lists ─────────────────────────────────── */
+
+.edge-link-list {
+  list-style: none;
+  padding-left: 0;
+  margin: 0;
+  font-size: 0.82rem;
+}
+
+.edge-link {
+  padding: 0.45rem 0.5rem;
+  border-bottom: 1px dashed #e4e7eb;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background-color 0.12s ease;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.edge-link:hover {
+  background: #eef1f4;
+}
+
+.edge-link:last-child {
+  border-bottom: none;
+}
+
+.edge-link-pid {
+  display: inline-block;
+  font-weight: 600;
+  color: #1f2933;
+  margin-right: 0.3rem;
+}
+
+.edge-link-pair {
+  color: #52606d;
+  margin-left: 0.2rem;
+}
+
+.edge-link-weight {
+  margin-left: 0.45rem;
+}
+
+.edge-link-deprecated .edge-link-pid {
+  text-decoration: line-through;
+  color: #9aa5b1;
+}
+
+.edge-link-flag {
+  color: #e63946;
+  margin-left: 0.45rem;
+}
+
+#node-table th {
+  vertical-align: top;
+}
+
 /* ── Action buttons ────────────────────────────────────────────────────── */
 
 .panel-actions {
