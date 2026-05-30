@@ -47,6 +47,7 @@
     ndInCount:  $('nd-in-count'),
     ndInList:   $('nd-in-list'),
 
+    edDescription: $('ed-description'),
     edFrom:        $('ed-from'),
     edTo:          $('ed-to'),
     edPid:         $('ed-pid'),
@@ -300,6 +301,21 @@
     els.panelNode.classList.add('hidden');
     els.panelEdge.classList.remove('hidden');
 
+    const prop = cachedGraph && cachedGraph.propositions
+      ? cachedGraph.propositions.find((p) => p.proposition_id === edge.proposition_id)
+      : null;
+
+    // Causal-claim sentence from the ontology. Empty for auto-proposed
+    // candidates that haven't been described yet; we hide the element in
+    // that case rather than show a blank line.
+    if (prop && prop.description) {
+      els.edDescription.textContent = prop.description;
+      els.edDescription.classList.remove('hidden');
+    } else {
+      els.edDescription.textContent = '';
+      els.edDescription.classList.add('hidden');
+    }
+
     els.edFrom.textContent = edge.from;
     els.edTo.textContent   = edge.to;
     els.edPid.textContent  = edge.proposition_id;
@@ -310,9 +326,6 @@
     els.edConf.textContent  = fmtFloat(edge.confidence);
     els.edNobs.textContent  = edge.n_observations ?? 0;
 
-    const prop = cachedGraph && cachedGraph.propositions
-      ? cachedGraph.propositions.find((p) => p.proposition_id === edge.proposition_id)
-      : null;
     if (prop && prop.deprecated) {
       els.edDeprecated.textContent = `yes — ${prop.deprecated_reason || '(no reason)'}`;
       els.edDeprecated.className = 'flag-deprecated';

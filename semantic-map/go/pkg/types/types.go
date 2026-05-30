@@ -60,6 +60,11 @@ type Proposition struct {
 	ToConstruct     string
 	Direction       Direction
 	PriorStrength   float64
+	// Description is a one-sentence English statement of the causal claim
+	// (e.g. "Lightweight distributions reduce pod-startup latency"). Empty
+	// for auto-proposed candidates until an operator fills it in via
+	// AddValidatedProposition. Populated for the Di-Select bootstrap P1–P15.
+	Description     string
 	EvidenceSources []string // e.g. ["P1", "P4"]
 	// Deprecated marks a proposition that the ontology no longer endorses but
 	// is preserved in-place (history/replay). Reasoners must skip deprecated

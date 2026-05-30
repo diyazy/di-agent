@@ -29,6 +29,7 @@ type PropositionDTO struct {
 	ToConstruct      string   `json:"to"`
 	Direction        string   `json:"direction"`
 	PriorStrength    float64  `json:"prior_strength"`
+	Description      string   `json:"description,omitempty"`
 	EvidenceSources  []string `json:"evidence_sources,omitempty"`
 	Deprecated       bool     `json:"deprecated"`
 	DeprecatedReason string   `json:"deprecated_reason,omitempty"`

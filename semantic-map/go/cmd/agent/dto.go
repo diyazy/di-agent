@@ -77,6 +77,7 @@ type PropositionDTO struct {
 	ToConstruct      string   `json:"to"`
 	Direction        string   `json:"direction"`
 	PriorStrength    float64  `json:"prior_strength"`
+	Description      string   `json:"description,omitempty"`
 	EvidenceSources  []string `json:"evidence_sources,omitempty"`
 	Deprecated       bool     `json:"deprecated"`
 	DeprecatedReason string   `json:"deprecated_reason,omitempty"`
@@ -163,6 +164,7 @@ func propositionToDTO(p *types.Proposition) PropositionDTO {
 		ToConstruct:      p.ToConstruct,
 		Direction:        directionToString(p.Direction),
 		PriorStrength:    p.PriorStrength,
+		Description:      p.Description,
 		EvidenceSources:  p.EvidenceSources,
 		Deprecated:       p.Deprecated,
 		DeprecatedReason: p.DeprecatedReason,

@@ -211,6 +211,23 @@ main {
   font-size: 0.75rem;
 }
 
+/* ── Edge description (causal claim) ───────────────────────────────────── */
+
+.edge-description {
+  margin: 0.25rem 0 0.75rem 0;
+  padding: 0.5rem 0.75rem;
+  background: #f0f4ff;
+  border-left: 3px solid #3e74e6;
+  border-radius: 4px;
+  font-size: 0.86rem;
+  font-style: italic;
+  color: #1f2933;
+}
+
+.edge-description.hidden {
+  display: none;
+}
+
 /* ── Node panel — clickable edge lists ─────────────────────────────────── */
 
 .edge-link-list {
