@@ -202,14 +202,14 @@ func (a *scenarioAgent) streamObservation(t *testing.T, fromID, toID string, val
 func TestScenario_PerKDDecisionsDiffer(t *testing.T) {
 	pwPath := findPriorWeightsFileForScenarios(t)
 
-	smK3s, err := profiles.Build("edge-minimal", profiles.Config{
+	smK3s, _, err := profiles.Build("edge-minimal", profiles.Config{
 		EMAAlpha: 0.2, ConvergenceThreshold: 500, MinTrustScore: 0.5,
 		PriorWeightsPath: pwPath, KD: "k3s",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	smK0s, err := profiles.Build("edge-minimal", profiles.Config{
+	smK0s, _, err := profiles.Build("edge-minimal", profiles.Config{
 		EMAAlpha: 0.2, ConvergenceThreshold: 500, MinTrustScore: 0.5,
 		PriorWeightsPath: pwPath, KD: "k0s",
 	})

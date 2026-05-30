@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/DiyazY/di-agent/internal/minimal"
+	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/semmap"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
@@ -38,6 +40,21 @@ type Config struct {
 	// used to seed storage instead of the global proposition strengths.
 	// Empty string = no per-distribution adjustment (global priors used).
 	KD string
+
+	// NodeID identifies this agent within the cluster (used by the Collector
+	// when generating event IDs). Empty string → callers (typically main)
+	// fall back to os.Hostname().
+	NodeID string
+
+	// CgroupRoot is the directory the CgroupCollector reads from.
+	// Production: /sys/fs/cgroup; tests use t.TempDir() with fake files.
+	// Empty string disables the cgroup collector (Build returns nil for the
+	// CollectorContract handle).
+	CgroupRoot string
+
+	// CollectInterval is how often the collection scheduler ticks. Zero
+	// disables the loop entirely. Callers (main.go) default to 10s.
+	CollectInterval time.Duration
 }
 
 func DefaultConfig() Config {
@@ -98,20 +115,25 @@ func loadPriorWeights(path string) (*priorWeightsFile, error) {
 
 // ── Build ─────────────────────────────────────────────────────────────────────
 
-// Build constructs and returns a fully wired SemanticMap for the named profile.
-func Build(profileName string, cfg Config) (*semmap.SemanticMap, error) {
+// Build constructs and returns a fully wired SemanticMap for the named
+// profile along with the profile's collector (if any). The returned
+// CollectorContract may be nil — the daemon must treat nil as "no
+// autonomous collection loop in this profile / configuration" and skip
+// scheduling.
+func Build(profileName string, cfg Config) (*semmap.SemanticMap, contracts.CollectorContract, error) {
 	pw, err := loadPriorWeights(cfg.PriorWeightsPath)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := validateKD(pw, cfg.KD); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	switch profileName {
 	case "edge-minimal":
-		return buildEdgeMinimal(cfg, pw), nil
+		sm, coll := buildEdgeMinimal(cfg, pw)
+		return sm, coll, nil
 	default:
-		return nil, fmt.Errorf("unknown profile %q", profileName)
+		return nil, nil, fmt.Errorf("unknown profile %q", profileName)
 	}
 }
 
@@ -130,7 +152,7 @@ func validateKD(pw *priorWeightsFile, kd string) error {
 	return fmt.Errorf("KD %q not found in prior_weights.json distributions %v", kd, pw.Distributions)
 }
 
-func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) *semmap.SemanticMap {
+func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, contracts.CollectorContract) {
 	storage  := minimal.NewInMemoryStorage()
 	ontology := minimal.NewStaticDiSelectOntology()
 	updater  := minimal.NewEMAUpdater(storage, cfg.EMAAlpha, cfg.ConvergenceThreshold)
@@ -145,7 +167,19 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) *semmap.SemanticMap {
 
 	seedFromOntology(storage, ontology, pw, cfg.KD)
 
-	return semmap.New(storage, ontology, updater, reasoner, proposer)
+	sm := semmap.New(storage, ontology, updater, reasoner, proposer)
+
+	// Construct the cgroup collector only if the daemon was configured to
+	// drive one. Empty CgroupRoot or NodeID → return nil and let the caller
+	// skip the collection loop. We do not fall back to defaults here because
+	// the daemon (main.go) is the authority on those defaults; profiles
+	// should not silently invent paths.
+	var collector contracts.CollectorContract
+	if cfg.CgroupRoot != "" && cfg.NodeID != "" {
+		collector = minimal.NewCgroupCollector(cfg.NodeID, cfg.CgroupRoot)
+	}
+
+	return sm, collector
 }
 
 // applyPriorWeights overwrites proposition PriorStrength values in the ontology

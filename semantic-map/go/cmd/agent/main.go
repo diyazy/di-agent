@@ -57,10 +57,11 @@ func main() {
 		KD:                   *kd,
 	}
 
-	sm, err := profiles.Build(*profileName, cfg)
+	sm, collector, err := profiles.Build(*profileName, cfg)
 	if err != nil {
 		log.Fatalf("failed to build profile %q: %v", *profileName, err)
 	}
+	_ = collector // collector is wired by the loop in step 4
 
 	mux := http.NewServeMux()
 	registerRoutes(mux, sm)
