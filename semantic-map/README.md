@@ -301,15 +301,18 @@ agent -profile edge-minimal -addr :8080 -alpha 0.2 -convergence 500 \
 go run ./cmd/agent -profile edge-minimal
 ```
 
-| Flag           | Default        | Description                                                              |
-| -------------- | -------------- | ------------------------------------------------------------------------ |
-| `-profile`     | `edge-minimal` | Deployment profile name                                                  |
-| `-addr`        | `:8080`        | HTTP listen address                                                      |
-| `-alpha`       | `0.2`          | EMA decay factor                                                         |
-| `-convergence` | `500`          | Observations until confidence = 1.0                                      |
-| `-min-trust`   | `0.5`          | Minimum peer trust score for offloading                                  |
-| `-priors`      | `""`           | Path to `prior_weights.json` from the initialization pipeline            |
-| `-kd`          | `""`           | KD running on this node (`k3s`/`k0s`/`k8s`/`kubeEdge`/`openYurt`). When set together with `-priors`, the per-KD edge weights in the file seed the graph instead of the global Di-Select strengths. |
+| Flag                | Default          | Description                                                              |
+| ------------------- | ---------------- | ------------------------------------------------------------------------ |
+| `-profile`          | `edge-minimal`   | Deployment profile name                                                  |
+| `-addr`             | `:8080`          | HTTP listen address                                                      |
+| `-alpha`            | `0.2`            | EMA decay factor                                                         |
+| `-convergence`      | `500`            | Observations until confidence = 1.0                                      |
+| `-min-trust`        | `0.5`            | Minimum peer trust score for offloading                                  |
+| `-priors`           | `""`             | Path to `prior_weights.json` from the initialization pipeline            |
+| `-kd`               | `""`             | KD running on this node (`k3s`/`k0s`/`k8s`/`kubeEdge`/`openYurt`). When set together with `-priors`, the per-KD edge weights in the file seed the graph instead of the global Di-Select strengths. |
+| `-collect-interval` | `10s`            | How often the autonomous collection loop ticks the profile's collector. Set to `0` to disable the loop (only manual `POST /ingest` will update edges). |
+| `-cgroup-root`      | `/sys/fs/cgroup` | Filesystem root the cgroup collector reads from. Empty string disables the loop (useful on macOS dev machines or nodes without cgroups v2). |
+| `-node-id`          | `""`             | Identifier this agent puts on emitted `MetricSample`s and uses in event IDs. Empty falls back to `os.Hostname()`. |
 
 ---
 

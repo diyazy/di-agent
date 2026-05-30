@@ -20,7 +20,7 @@ import (
 // avoid duplicating the agent boot sequence.
 func newTestAgent(t *testing.T) (baseURL string, sm *semmap.SemanticMap, cleanup func()) {
 	t.Helper()
-	sm, err := profiles.Build("edge-minimal", profiles.Config{
+	sm, _, err := profiles.Build("edge-minimal", profiles.Config{
 		EMAAlpha:             0.2,
 		ConvergenceThreshold: 500,
 		MinTrustScore:        0.5,
