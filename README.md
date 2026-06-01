@@ -1,5 +1,7 @@
 # di-agent
 
+[![CI](https://github.com/DiyazY/di-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/DiyazY/di-agent/actions/workflows/ci.yml)
+
 **Context-Aware Agent for Decentralized Edge Orchestration**
 
 Implementation artifact for the dissertation *A Context-Aware Agentic Framework for Decentralized Edge Computing* (Tampere University, Diyaz Yakubov, supervised by David Hästbacka and Sergio Moreschini). Funded by Business Finland — Industry X and 6GSoft projects.

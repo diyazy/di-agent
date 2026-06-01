@@ -215,6 +215,112 @@ cmd_smoke() {
     fi
 }
 
+cmd_demo() {
+    # Guided tour. Single command that takes a fresh checkout from "what is
+    # this?" to "I've seen it work end-to-end" in under five minutes.
+    #
+    # Flags:
+    #   --quick    skip the explanatory pauses (good for automated runs)
+    #   --paper    only print the structured tables / summaries (no narration)
+    #   --no-ui    don't open the browser at the end
+
+    local quick=0 paper=0 noui=0
+    for arg in "$@"; do
+        case "$arg" in
+            --quick)  quick=1 ;;
+            --paper)  paper=1; quick=1 ;;   # paper mode implies quick
+            --no-ui)  noui=1 ;;
+            *) warn "demo: unknown flag $arg (try --quick, --paper, --no-ui)";;
+        esac
+    done
+
+    local PAUSE='read -r -p "  ── press enter to continue ──"'
+    [[ "$quick" -eq 1 ]] && PAUSE='true'
+
+    cleanup_demo() {
+        cmd_stop >/dev/null 2>&1
+        printf "%s\n" ""
+        info "demo finished. Daemon stopped."
+    }
+    trap cleanup_demo EXIT INT TERM
+
+    if [[ "$paper" -eq 0 ]]; then
+        cat <<HEADER
+${BOLD}${BLUE}
+╔══════════════════════════════════════════════════════════════╗
+║          Semantic Map  —  guided demo                        ║
+║          12 scenarios · live evolution · ~3 minutes           ║
+╚══════════════════════════════════════════════════════════════╝
+${RESET}
+HEADER
+    fi
+
+    # ── Step 1: build + start ────────────────────────────────────────────────
+    if [[ "$paper" -eq 0 ]]; then
+        info "Step 1/5  build + start the daemon"
+        step "(rebuilds binaries to /tmp; idempotent)"
+    fi
+    cmd_build >/dev/null
+    cmd_stop  >/dev/null 2>&1 || true
+    cmd_start
+    [[ "$paper" -eq 0 ]] && eval "$PAUSE"
+
+    # ── Step 2: static state ────────────────────────────────────────────────
+    if [[ "$paper" -eq 0 ]]; then
+        echo
+        info "Step 2/5  what the agent ships with — 7 constructs, 15 propositions"
+        step "(Di-Select backbone, multigraph: 3 conflict pairs)"
+        cmd_cli graph
+        echo
+        info "the multigraph conflict pair on RC→PS (P2 negative, P3 positive):"
+        cmd_cli edges --from RC --to PS
+        eval "$PAUSE"
+    fi
+
+    # ── Step 3: invariant scenarios (6 tests) ───────────────────────────────
+    if [[ "$paper" -eq 0 ]]; then
+        echo
+        info "Step 3/5  6 invariant scenarios — core mechanics (cold start, convergence, deprecation, replay, audit)"
+        step "(go test -v -run TestScenario)"
+    fi
+    go test -v -run TestScenario ./internal/minimal/tests/... 2>&1 | demo_filter_test_output
+    [[ "$paper" -eq 0 ]] && eval "$PAUSE"
+
+    # ── Step 4: evolution scenarios (6 tests) ───────────────────────────────
+    if [[ "$paper" -eq 0 ]]; then
+        echo
+        info "Step 4/5  6 evolution scenarios — live convergence via ScriptedCollector + Bridge"
+        step "(go test -v -run TestEvolution)"
+    fi
+    go test -v -run TestEvolution ./internal/minimal/tests/... 2>&1 | demo_filter_test_output
+    [[ "$paper" -eq 0 ]] && eval "$PAUSE"
+
+    # ── Step 5: open the UI ─────────────────────────────────────────────────
+    if [[ "$paper" -eq 0 ]]; then
+        echo
+        info "Step 5/5  the embedded web viewer at http://localhost:$PORT/ui/"
+        step "(7-node cytoscape graph · click nodes/edges · deprecate/strength/reset live)"
+        if [[ "$noui" -eq 0 ]]; then
+            cmd_ui
+            echo
+            info "Daemon is still running. Explore the UI, then press enter to stop."
+            read -r
+        else
+            info "(skipped --no-ui)  Open http://localhost:$PORT/ui/ manually if you want."
+            eval "$PAUSE"
+        fi
+    fi
+    # The trap will cmd_stop.
+}
+
+# demo_filter_test_output trims Go test framework noise (=== RUN, --- PASS,
+# PASS, ok lines) so only the t.Logf narration shows. The trim keeps the
+# output focused on what the scenarios *demonstrate* rather than what go test
+# reports about itself.
+demo_filter_test_output() {
+    grep -E -v '^(===|---|FAIL$|PASS$|ok |FAIL\b|\?[[:space:]])' | sed 's/^    [a-zA-Z0-9_]*\.go:[0-9]*:[[:space:]]*//'
+}
+
 cmd_clean() {
     cmd_stop
     step "rm -f $AGENT_BIN $MAPCTL_BIN $LOG_FILE"
@@ -242,6 +348,7 @@ ${BOLD}Commands:${RESET}
   ${BOLD}cli${RESET} ...    Run mapctl with --addr already set, e.g. ./dev.sh cli graph
   ${BOLD}test${RESET}       go test ./... + go vet ./...
   ${BOLD}smoke${RESET}      End-to-end smoke (curl + mapctl) against the running daemon
+  ${BOLD}demo${RESET}       Guided tour: build → graph → 12 scenarios → UI (use --quick, --paper, --no-ui)
   ${BOLD}clean${RESET}      Stop, remove binaries, clear go build cache
   ${BOLD}help${RESET}       This help
 
@@ -254,6 +361,9 @@ ${BOLD}Environment overrides:${RESET}
   CONVERGENCE   ${BLUE}${CONVERGENCE}${RESET}            observations until confidence=1.0
 
 ${BOLD}Examples:${RESET}
+  ./dev.sh demo                    # ★ first-time? this. 3-minute guided tour.
+  ./dev.sh demo --quick            # same tour, no pauses (good in CI)
+  ./dev.sh demo --paper            # only the structured scenario outputs (no chrome)
   ./dev.sh restart                 # rebuild + restart in one command
   ./dev.sh cli graph               # mapctl --addr http://localhost:8080 graph
   ./dev.sh cli deprecate P1 "test"
@@ -281,6 +391,7 @@ case "$CMD" in
     cli)            cmd_cli "$@" ;;
     test)           cmd_test ;;
     smoke)          cmd_smoke ;;
+    demo)           cmd_demo "$@" ;;
     clean)          cmd_clean ;;
     help|--help|-h) cmd_help ;;
     *)              fail "unknown command: $CMD (try './dev.sh help')" ;;
