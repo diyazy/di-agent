@@ -277,10 +277,35 @@ Because `event_id` flows unchanged from Collector → Bridge → Updater, idempo
 | ------------------- | -------------------------------- | ----------------------- | ------- | -------------------------------------------------------------------- |
 | `CgroupCollector`   | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go` | cpu\_utilization, memory\_utilization, cpu\_throttle\_ratio |
 | `ScriptedCollector` | programmable patterns (in-process) | demo / scenarios / replay | ✅ done — `internal/scripted/collector.go`     | any MetricType the patterns declare (Constant / Ramp / Step / Sine / Burst / Noisy) |
+| `ParquetReplay`     | Netdata parquet datasets (out-of-process HTTP) | dissertation reproducibility | ✅ done — `cmd/replay/`               | cpu\_utilization, memory\_utilization, network\_rx\_bps, network\_tx\_bps           |
 | `KubeletCollector`  | kubelet `/metrics/resource`      | `edge-standard`         | planned | pod\_startup\_ms, scheduling\_latency\_ms                            |
 | `NetdataCollector`  | Netdata HTTP streaming API       | `cloud-full`            | planned | All MetricTypes + custom chart contexts                              |
 
 Multiple collectors can run concurrently in the same agent (e.g., `edge-standard` runs both Cgroup and Kubelet). The Bridge processes all their outputs — idempotency ensures overlapping `event_id`s from the same physical observation are harmless.
+
+#### Externally-driven path: parquet replay
+
+`cmd/replay/` differs from the other rows above: it is a standalone HTTP
+client, not a `CollectorContract` implementation living inside the daemon.
+The split is deliberate — the replay tool reproduces the dissertation's
+P1–P5 dataset (225 Netdata parquets) from outside the daemon by POSTing
+`MetricSample`s to `/ingest-sample`. That endpoint runs the Bridge
+server-side, so externally-driven samples take the same code path as
+in-process collectors. Two benefits fall out:
+
+- Anyone with a Go toolchain and the dataset can reproduce the convergence
+  story without linking against internal packages — `cmd/replay/` imports
+  only `pkg/types` (via duplicated wire DTOs in `cmd/replay/client/`).
+- The replay tool's `EventID` derivation (`sha256("replay:" + parquet +
+  ":" + hostname + ":" + chart_context + ":" + metric_id + ":" +
+  relative_time)[:16]`) carries the Updater's idempotency guarantee
+  end-to-end: re-replaying the same parquet cannot inflate
+  `n_observations`. The acceptance proof is the
+  `n_observations`-before/after/after-again triple in the README.
+
+The `(chart_context, metric_id, units)` → `MetricType` mapping table lives
+in `cmd/replay/mapping/mapping.go`. Extending it is a one-package change
+with no impact on the daemon or its profiles.
 
 ### Implementation status
 

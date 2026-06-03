@@ -12,6 +12,7 @@
 package main
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/types"
@@ -52,6 +53,25 @@ type AddPropositionRequest struct {
 type ResetRequest struct {
 	From string `json:"from"`
 	To   string `json:"to"`
+}
+
+// MetricSampleRequest is the body of POST /ingest-sample.
+//
+// Distinct from POST /ingest: where /ingest takes a pre-routed (from_id,
+// to_id, observation, event_id) tuple and bypasses the Bridge, /ingest-sample
+// carries a MetricSample that the daemon routes through Bridge server-side.
+// This is the public-API entry point for external collectors (e.g. the
+// parquet replay tool) that don't speak Go and can't call IngestSample
+// directly. ContainerID and Labels are optional and informational only —
+// the Bridge does not branch on them in v1.
+type MetricSampleRequest struct {
+	NodeID        string            `json:"node_id"`
+	MetricType    string            `json:"metric_type"`
+	Value         float64           `json:"value"`
+	TimestampUnix int64             `json:"timestamp_unix"`
+	EventID       string            `json:"event_id"`
+	ContainerID   string            `json:"container_id,omitempty"`
+	Labels        map[string]string `json:"labels,omitempty"`
 }
 
 // ── Response DTOs ─────────────────────────────────────────────────────────────
@@ -194,4 +214,43 @@ func eventToDTO(e *types.OntologyEvent) OntologyEventDTO {
 		TargetID:  e.TargetID,
 		Detail:    e.Detail,
 	}
+}
+
+// knownMetricTypes is the closed enumeration of accepted metric types on the
+// /ingest-sample boundary. The Bridge silently ignores types not in
+// metricTypeToConstruct, but the HTTP layer rejects unknown values up front
+// so that operators (and the replay tool) get a clear 400 instead of a
+// silent no-op.
+var knownMetricTypes = map[types.MetricType]struct{}{
+	types.CPUUtilization:      {},
+	types.MemoryUtilization:   {},
+	types.CPUThrottleRatio:    {},
+	types.BlockIOUtil:         {},
+	types.EnergyJoules:        {},
+	types.PodStartupMs:        {},
+	types.SchedulingLatencyMs: {},
+	types.NetworkRxBps:        {},
+	types.NetworkTxBps:        {},
+	types.NetworkLossRatio:    {},
+	types.NetworkLatencyMs:    {},
+}
+
+// sampleRequestToTypes converts the wire DTO into a *types.MetricSample,
+// validating the metric_type string against the closed catalogue declared in
+// pkg/types. Returns an error suitable for writeError(400, ...) when the
+// metric type is unknown.
+func sampleRequestToTypes(req *MetricSampleRequest) (*types.MetricSample, error) {
+	mt := types.MetricType(req.MetricType)
+	if _, ok := knownMetricTypes[mt]; !ok {
+		return nil, fmt.Errorf("unknown metric_type %q; must be one of the types in pkg/types.MetricType", req.MetricType)
+	}
+	return &types.MetricSample{
+		NodeID:        req.NodeID,
+		MetricType:    mt,
+		Value:         req.Value,
+		TimestampUnix: req.TimestampUnix,
+		EventID:       req.EventID,
+		ContainerID:   req.ContainerID,
+		Labels:        req.Labels,
+	}, nil
 }

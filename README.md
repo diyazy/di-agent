@@ -66,3 +66,14 @@ P5: Overhead decomposition
 ## Status
 
 Early implementation — contracts, edge-minimal daemon, and prior initialization pipeline are in active development. Code will be published here as P6 matures toward submission.
+
+## Quick start
+
+```bash
+cd semantic-map/go
+./dev.sh demo              # 3-minute guided tour: build, graph, 12 scenarios, UI
+./dev.sh replay list       # inventory of the dissertation's 225 Netdata parquets
+./dev.sh replay run --kd k0s --test idle --run 1 --speed 0   # replay one parquet
+```
+
+See [`semantic-map/README.md`](semantic-map/README.md) for the full structure, API, and operational guide; [`semantic-map/ARCHITECTURE.md`](semantic-map/ARCHITECTURE.md) for the design record (contracts, profiles, multigraph, externally-driven replay path).

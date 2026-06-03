@@ -508,6 +508,89 @@ func TestStaticUI_RootServesIndex(t *testing.T) {
 	}
 }
 
+// ── /ingest-sample (Bridge-routed telemetry) ──────────────────────────────────
+
+func TestIngestSample_AppliesBridgeRouting(t *testing.T) {
+	// A cpu_utilization sample routes to RC via the Bridge, which fans out to
+	// every edge touching RC (P1: SC→RC, P2: RC→PS, P3: RC→PS, P8: MU→RC,
+	// P10: PS→RC, P14: RC→SC). After one POST, all of those edges must show
+	// n_observations >= 1 — we assert on the SC→RC pair for headline proof
+	// and then verify the RC-side fan-out via /edges.
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+
+	resp := postJSON(t, base+"/ingest-sample", MetricSampleRequest{
+		NodeID:        "master",
+		MetricType:    "cpu_utilization",
+		Value:         0.7,
+		TimestampUnix: time.Now().Unix(),
+		EventID:       "ingest-sample-test-1",
+	})
+	if resp.StatusCode != 204 {
+		t.Fatalf("POST /ingest-sample: %s", body(resp))
+	}
+	resp.Body.Close()
+
+	// At least one edge touching RC must register the observation. Edges
+	// before SC→RC (P1) are the most direct proof: a Bridge that ignored the
+	// sample would leave them at n=0.
+	var edges []EdgeDTO
+	getJSON(t, base+"/edges?from=SC&to=RC", &edges)
+	if len(edges) == 0 {
+		t.Fatal("SC→RC returned no edges; ontology missing P1?")
+	}
+	for _, e := range edges {
+		if e.NObservations < 1 {
+			t.Errorf("edge %s (SC→RC) n_observations=%d after one sample; want >=1",
+				e.PropositionID, e.NObservations)
+		}
+	}
+}
+
+func TestIngestSample_UnknownMetricTypeReturns400(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	resp := postJSON(t, base+"/ingest-sample", MetricSampleRequest{
+		NodeID:        "master",
+		MetricType:    "bogus_metric",
+		Value:         1.0,
+		TimestampUnix: time.Now().Unix(),
+		EventID:       "ingest-sample-unknown",
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Errorf("unknown metric_type: got %d, want 400 (%s)", resp.StatusCode, body(resp))
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("error Content-Type: got %q, want application/json", ct)
+	}
+	var er ErrorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&er); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if !strings.Contains(er.Error, "bogus_metric") {
+		t.Errorf("error %q should mention the bad metric_type", er.Error)
+	}
+}
+
+func TestIngestSample_RequiresJSON(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	resp := postRaw(t, base+"/ingest-sample",
+		`{"node_id":"master","metric_type":"cpu_utilization","value":0.5,"timestamp_unix":1,"event_id":"x"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Errorf("missing Content-Type: got %d, want 400", resp.StatusCode)
+	}
+	var er ErrorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&er); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if !strings.Contains(er.Error, "application/json") {
+		t.Errorf("error %q should mention application/json", er.Error)
+	}
+}
+
 func TestSetStrength_UnknownProposition_Returns500WithErrorJSON(t *testing.T) {
 	base, _, cleanup := newTestAgent(t)
 	defer cleanup()

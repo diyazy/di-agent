@@ -10,6 +10,7 @@ package main
 // /simulate                         POST    {context,target_node_id}       200 OutcomeSimulation
 // /candidates                       GET     —                              200 []CandidateEdge
 // ─────────────────────────────────────────────────────────────────────────────────────────
+// /ingest-sample                    POST    MetricSampleRequest            204
 // /graph                            GET     —                              200 GraphSnapshot
 // /edges                            GET     ?from=&to=                     200 []EdgeDTO
 // /constructs                       GET     —                              200 []ConstructDTO
@@ -444,6 +445,37 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 			return
 		}
 		if err := sm.ResetEdge(req.From, req.To); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	// POST /ingest-sample — Bridge-routed telemetry from external collectors.
+	//
+	// Where POST /ingest takes a fully pre-routed (from, to, value, event_id)
+	// tuple and bypasses the Bridge, /ingest-sample carries a typed MetricSample
+	// and runs the Bridge server-side. This is the public-API entry point for
+	// out-of-tree collectors (e.g. the parquet replay tool) that cannot
+	// import internal Go packages. Bridge silently ignores unmapped metric
+	// types; this handler additionally rejects values outside the closed
+	// catalogue with 400 so misconfigured callers fail loudly.
+	mux.HandleFunc("POST /ingest-sample", func(w http.ResponseWriter, r *http.Request) {
+		if err := requireJSON(r); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		var req MetricSampleRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		sample, err := sampleRequestToTypes(&req)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := sm.IngestSample(sample); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}

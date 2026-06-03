@@ -150,18 +150,34 @@ semantic-map/
     │       ├── app.js          Vanilla-JS controller; fetches /graph; POSTs mutations
     │       └── style.css       Edge color by direction, opacity by confidence, dashed when deprecated
     │
-    └── cmd/mapctl/             CLI binary — cobra + tablewriter; speaks the daemon's HTTP API
-        ├── main.go             cmd.Execute()
-        ├── cmd/                One file per subcommand (graph, edges, history, strength,
-        │                       deprecate, construct, proposition, reset, candidates,
-        │                       recommend, simulate, watch, dot, health, version, completion)
-        ├── client/             HTTP client + DTOs duplicated (NOT imported) from cmd/agent
-        │   ├── client.go
-        │   ├── types.go
-        │   └── client_test.go
-        └── render/             Output formatters
-            ├── table.go        tablewriter wrapper honoring --no-color
-            └── json.go         render.JSON(w, v) for --json mode
+    ├── cmd/mapctl/             CLI binary — cobra + tablewriter; speaks the daemon's HTTP API
+    │   ├── main.go             cmd.Execute()
+    │   ├── cmd/                One file per subcommand (graph, edges, history, strength,
+    │   │                       deprecate, construct, proposition, reset, candidates,
+    │   │                       recommend, simulate, watch, dot, health, version, completion)
+    │   ├── client/             HTTP client + DTOs duplicated (NOT imported) from cmd/agent
+    │   │   ├── client.go
+    │   │   ├── types.go
+    │   │   └── client_test.go
+    │   └── render/             Output formatters
+    │       ├── table.go        tablewriter wrapper honoring --no-color
+    │       └── json.go         render.JSON(w, v) for --json mode
+    │
+    └── cmd/replay/             Parquet replay binary — drives the 225 Netdata
+        │                       parquets (P1–P5 dataset) into POST /ingest-sample
+        ├── main.go             run / all / probe / list subcommands (flag dispatch)
+        ├── parquet/            Streaming long-format reader over parquet-go v0.25.1
+        │   ├── reader.go       Open + Next + Close; 4096-row batched buffer
+        │   └── reader_test.go  Synthesized fixture parquets in t.TempDir()
+        ├── mapping/            chart_context+metric_id+units → MetricType + normalizer
+        │   ├── mapping.go      v1 table (cpu/ram/net) — cross-KD; documented at top
+        │   └── mapping_test.go Table-driven (+ negative cases)
+        ├── playback/           Tick-grouped replay loop with time-warp speed control
+        │   ├── runner.go       Run(ctx, sender, cfg) + deterministic EventID()
+        │   └── runner_test.go  httptest.Server-backed Sender; covers EventID
+        │                       determinism across two replays (idempotency proof)
+        └── client/             POST /ingest-sample wrapper + DTOs duplicated
+            └── client.go        from cmd/agent (same wire-boundary discipline as mapctl)
 ```
 
 For the architectural rationale behind the multigraph, live ontology, control surface, and per-layer language strategy, see [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -231,6 +247,24 @@ Feed a telemetry observation directly into the Updater.
 
 `event_id` is required. The Updater is idempotent: replaying the same `event_id` is a no-op. The Collector produces these automatically; use this endpoint for manual injection or testing.
 
+### `POST /ingest-sample`
+
+Feed one typed `MetricSample` through the Bridge. The daemon maps the
+`metric_type` to its primary construct, looks up every relationship that
+touches that construct, and calls `UpdateEdge` on each unique `(from, to)`
+pair — i.e. the same fan-out the in-process collection loop performs.
+
+```json
+{"node_id":"master","metric_type":"cpu_utilization","value":0.71,
+ "timestamp_unix":1703208286,"event_id":"replay:idle_run1:master:system.cpu:idle:0"}
+```
+
+`metric_type` must be one of the values in `pkg/types.MetricType` (e.g.
+`cpu_utilization`, `memory_utilization`, `network_rx_bps`, …); unknown
+values return `400`. This is the public-API entry point for out-of-tree
+collectors — the parquet replay tool in particular speaks only this
+endpoint.
+
 ### `GET /candidates`
 
 Lists Proposer candidate edges pending review.
@@ -249,6 +283,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | Verb | Path                                | Body / params                                            | Since    |
 | ---- | ----------------------------------- | -------------------------------------------------------- | -------- |
 | POST | `/ingest`                           | `{from_id,to_id,observation,event_id}`                   | existing |
+| POST | `/ingest-sample`                    | `MetricSampleRequest`                                    | replay   |
 | GET  | `/cost`                             | `?task=&node=`                                           | existing |
 | POST | `/recommend`                        | `OffloadContext`                                         | existing |
 | POST | `/simulate`                         | `{context, target_node_id}`                              | existing |
@@ -300,6 +335,50 @@ agent -profile edge-minimal -addr :8080 -alpha 0.2 -convergence 500 \
 # Run locally (development)
 go run ./cmd/agent -profile edge-minimal
 ```
+
+### Replay (Netdata parquet datasets)
+
+`cmd/replay/` drives the dissertation's 225 Netdata parquets
+(`multidimensional-analysis/data/raw/{kd}/{test}_runN.parquet` — five KDs ×
+nine test types × five runs) into the daemon's `/ingest-sample` endpoint at
+a configurable speed. This is how the real-data convergence story is
+reproducible from a single command:
+
+```bash
+./dev.sh build                                     # also produces /tmp/semantic-map-replay
+./dev.sh start
+
+./dev.sh replay list                               # inventory of parquets on disk
+./dev.sh replay probe --kd k0s --test idle --run 1 # unique chart_context triples
+./dev.sh replay run --kd k0s --test idle --run 1 --speed 0    # max throughput
+./dev.sh replay run --kd k0s --test idle --run 1 --speed 60   # 60× compression
+./dev.sh replay all --kd k0s --speed 0              # all 9 test types × 5 runs
+```
+
+Each row whose `(chart_context, metric_id, units)` matches the v1 mapping
+table becomes one HTTP POST to `/ingest-sample`. The `EventID` for a row
+is `sha256("replay:" + parquet + ":" + hostname + ":" + chart_context + ":"
++ metric_id + ":" + relative_time)[:16]` — deterministic, so replaying the
+same parquet twice cannot inflate `n_observations`. The end-to-end
+idempotency proof lives in `cmd/replay/playback/runner_test.go`
+(`TestRunner_EventIDsAreDeterministicAcrossRuns`).
+
+Mapping table (cross-KD; see `cmd/replay/mapping/mapping.go` for the
+single-row normalizer per triple):
+
+| `chart_context` | `metric_id` | `MetricType` | Normalizer |
+| --- | --- | --- | --- |
+| `system.cpu` | `idle` | `cpu_utilization` | `1.0 - value/100.0`, clipped to `[0,1]` |
+| `system.ram` | `used` | `memory_utilization` | `value / hostRAM`, host total from testbed (master=64 GiB, RPi4=8 GiB) |
+| `system.net` | `InOctets` | `network_rx_bps` | `value * 125` (kilobits/s → bytes/s) |
+| `system.net` | `OutOctets` | `network_tx_bps` | `|value| * 125` (Netdata reports outbound as signed-negative) |
+
+Rows outside the table (Netdata's own `netdata.workers.*` self-monitoring,
+disk/inode contexts, per-core `cpu.cpu` channels, …) are silently dropped
+by the playback layer. Extending the table later is a contained change in
+`cmd/replay/mapping/mapping.go`; the runner and CLI need no edits.
+
+---
 
 | Flag                | Default          | Description                                                              |
 | ------------------- | ---------------- | ------------------------------------------------------------------------ |
