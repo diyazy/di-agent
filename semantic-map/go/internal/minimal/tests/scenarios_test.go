@@ -16,8 +16,13 @@
 package minimal_test
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
@@ -25,10 +30,16 @@ import (
 	"time"
 
 	"github.com/DiyazY/di-agent/internal/minimal"
+	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/profiles"
 	"github.com/DiyazY/di-agent/pkg/semmap"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
+
+// newJSONDecoder / newJSONEncoder are tiny wrappers so the scenario HTTP
+// surface mirrors the daemon's wire format without import gymnastics.
+func newJSONDecoder(r *http.Request) *json.Decoder { return json.NewDecoder(r.Body) }
+func newJSONEncoder(w io.Writer) *json.Encoder     { return json.NewEncoder(w) }
 
 // ── scenarioAgent: SemanticMap + handles for inspection ──────────────────────
 
@@ -404,6 +415,341 @@ func TestScenario_AuditTrailRecordsEverything(t *testing.T) {
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+// ── Scenario 7: Multi-agent coordination — the headline ──────────────────────
+//
+// Wires three in-process agents (A, B, C), each behind its own httptest
+// server with the minimum HTTP surface RecommendPeer needs (/cost, /healthz,
+// /offload). Each agent is biased so its CostOfAction returns a different
+// EnergyCost: A low (attractive offload target), B high (the agent that
+// wants to offload), C medium. Cross-registers A, B, and C in every other
+// agent's peer registry.
+//
+// The scenario walks through:
+//  1. Pre-flight: each agent's local CostOfAction.
+//  2. B.RecommendPeer — must pick A (the lowest-cost peer, highest savings).
+//  3. B → A: POST /offload through peers.Client with realistic budgets.
+//  4. A accepts; B updates A's trust by +0.1.
+//  5. Final summary table: per-agent self-cost, B's trust scores for A/C,
+//     and the final decision narrative.
+
+// coordinationAgent is one node in the multi-agent scenario. Pairs the
+// edge-minimal SemanticMap with the httptest.Server and the peer registry so
+// the test code can assert on both the wire and the in-memory state.
+type coordinationAgent struct {
+	name string
+	sm   *semmap.SemanticMap
+	srv  *httptest.Server
+}
+
+// newCoordinationAgent builds one agent and starts its HTTP server. peerURLs
+// is the list of OTHER agents this agent should know about — registered with
+// the default trust of 0.5.
+func newCoordinationAgent(t *testing.T, name string, peerURLs ...string) *coordinationAgent {
+	t.Helper()
+	sm, _, err := profiles.Build("edge-minimal", profiles.Config{
+		EMAAlpha:             0.5,
+		ConvergenceThreshold: 100,
+		MinTrustScore:        0.5,
+		PeerURLs:             peerURLs,
+	})
+	if err != nil {
+		t.Fatalf("profiles.Build %s: %v", name, err)
+	}
+	mux := http.NewServeMux()
+	registerScenarioHTTP(mux, sm)
+	srv := httptest.NewServer(mux)
+	return &coordinationAgent{name: name, sm: sm, srv: srv}
+}
+
+// registerScenarioHTTP wires the minimum HTTP surface RecommendPeer needs to
+// talk to a remote peer: GET /cost, GET /healthz, POST /offload. The agent
+// daemon's full route set lives in cmd/agent (package main) and cannot be
+// imported by tests in this package — so we re-wire just what the scenario
+// requires. The wire shapes match the daemon exactly so peers.Client works
+// against either implementation.
+func registerScenarioHTTP(mux *http.ServeMux, sm *semmap.SemanticMap) {
+	mux.HandleFunc("GET /cost", func(w http.ResponseWriter, r *http.Request) {
+		task := r.URL.Query().Get("task")
+		node := r.URL.Query().Get("node")
+		cost, err := sm.CostOfAction(task, node)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		writeJSONBody(w, cost)
+	})
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
+	mux.HandleFunc("POST /offload", func(w http.ResponseWriter, r *http.Request) {
+		var req peers.OffloadRequest
+		if err := decodeJSON(r, &req); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		cost, err := sm.CostOfAction(req.TaskType, req.SourceNodeID)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		resp := peers.OffloadResponse{
+			Accepted:        true,
+			Reason:          "within budget",
+			ExpectedLatency: cost.LatencyEstimate,
+			ExpectedEnergy:  cost.EnergyCost,
+		}
+		if req.LatencyBudgetMs > 0 && cost.LatencyEstimate > req.LatencyBudgetMs {
+			resp.Accepted = false
+			resp.Reason = fmt.Sprintf("latency %.2f > budget %.2f", cost.LatencyEstimate, req.LatencyBudgetMs)
+		} else if req.EnergyBudgetJoules != nil && cost.EnergyCost > *req.EnergyBudgetJoules {
+			resp.Accepted = false
+			resp.Reason = fmt.Sprintf("energy %.2f > budget %.2f", cost.EnergyCost, *req.EnergyBudgetJoules)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		writeJSONBody(w, resp)
+	})
+}
+
+// biasEnergyTo drives the agent's CostOfAction EnergyCost toward a chosen
+// level by ingesting the same constant on each of the three edges that feed
+// into RC (the reasoner's energy aggregator). Drives the EMA close enough to
+// the target that conf×ema dominates the (1-conf)×prior term — 200 ticks at
+// alpha=0.5 / convergence=100 saturates confidence at 1.0.
+//
+//   target ≈ +0.85 → high-cost agent (the one that wants to offload)
+//   target ≈ +0.10 → low-cost agent  (the attractive offload destination)
+//   target ≈ +0.50 → medium-cost agent
+//
+// The shape is: P1 SC→RC (+, prior 0.6) contribution = +obs.
+//
+//	P8  MU→RC (−, prior 0.5) contribution = −obs.
+//	P10 PS→RC (−, prior 0.5) contribution = −obs.
+//	Net energy ≈ +obs_sc − obs_mu − obs_ps.
+//
+// To hit +0.85 we set sc=0.95, mu=0.05, ps=0.05 → 0.85.
+// To hit +0.10 we set sc=0.20, mu=0.05, ps=0.05 → 0.10.
+// To hit +0.50 we set sc=0.60, mu=0.05, ps=0.05 → 0.50.
+func biasEnergyTo(t *testing.T, sm *semmap.SemanticMap, label string, scObs, mu, ps float64) {
+	t.Helper()
+	const ticks = 200
+	for i := 0; i < ticks; i++ {
+		if err := sm.Ingest("SC", "RC", scObs, fmt.Sprintf("%s-sc-%d", label, i)); err != nil {
+			t.Fatal(err)
+		}
+		if err := sm.Ingest("MU", "RC", mu, fmt.Sprintf("%s-mu-%d", label, i)); err != nil {
+			t.Fatal(err)
+		}
+		if err := sm.Ingest("PS", "RC", ps, fmt.Sprintf("%s-ps-%d", label, i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// decodeJSON / writeJSONBody are tiny helpers so registerScenarioHTTP does not
+// depend on the cmd/agent package. The encodings match the daemon's
+// application/json convention.
+func decodeJSON(r *http.Request, v any) error {
+	defer r.Body.Close()
+	dec := newJSONDecoder(r)
+	return dec.Decode(v)
+}
+
+func writeJSONBody(w http.ResponseWriter, v any) {
+	enc := newJSONEncoder(w)
+	_ = enc.Encode(v)
+}
+
+func TestScenario_CoordinationOffload(t *testing.T) {
+	t.Log("Scenario 7: three in-process agents coordinate via /peers + /offload.")
+	t.Log("")
+	t.Log("Setup:")
+	t.Log("  Agent A — idle (low energy cost, attractive offload destination)")
+	t.Log("  Agent B — loaded (high energy cost, wants to offload)")
+	t.Log("  Agent C — medium (in the middle)")
+	t.Log("  Each agent runs its own httptest server with /cost, /healthz, /offload.")
+	t.Log("")
+
+	// ── Wire each agent (peers are populated in a second pass so we have URLs) ──
+
+	a := newCoordinationAgent(t, "A")
+	defer a.srv.Close()
+	b := newCoordinationAgent(t, "B")
+	defer b.srv.Close()
+	c := newCoordinationAgent(t, "C")
+	defer c.srv.Close()
+
+	// Cross-register: each agent knows about the other two.
+	for _, p := range []struct {
+		who *coordinationAgent
+		url string
+	}{
+		{a, b.srv.URL}, {a, c.srv.URL},
+		{b, a.srv.URL}, {b, c.srv.URL},
+		{c, a.srv.URL}, {c, b.srv.URL},
+	} {
+		if _, err := p.who.sm.Peers().Add(p.url, ""); err != nil {
+			t.Fatalf("register peer on %s: %v", p.who.name, err)
+		}
+	}
+
+	// ── Bias each agent so CostOfAction returns a distinguishable energy cost ──
+
+	biasEnergyTo(t, a.sm, "A", 0.20, 0.05, 0.05) // → ≈ 0.10 (low)
+	biasEnergyTo(t, b.sm, "B", 0.95, 0.05, 0.05) // → ≈ 0.85 (high)
+	biasEnergyTo(t, c.sm, "C", 0.60, 0.05, 0.05) // → ≈ 0.50 (medium)
+
+	// ── Pre-flight: print each agent's self-cost ────────────────────────────────
+
+	costA, _ := a.sm.CostOfAction("pod-scheduling", "node_self")
+	costB, _ := b.sm.CostOfAction("pod-scheduling", "node_self")
+	costC, _ := c.sm.CostOfAction("pod-scheduling", "node_self")
+
+	t.Log("Pre-flight self-costs (pod-scheduling):")
+	t.Logf("  A:  energy=%.3f  latency=%.3f  conf=%.3f", costA.EnergyCost, costA.LatencyEstimate, costA.Confidence)
+	t.Logf("  B:  energy=%.3f  latency=%.3f  conf=%.3f", costB.EnergyCost, costB.LatencyEstimate, costB.Confidence)
+	t.Logf("  C:  energy=%.3f  latency=%.3f  conf=%.3f", costC.EnergyCost, costC.LatencyEstimate, costC.Confidence)
+	t.Log("")
+
+	// Mandatory ordering for the recommendation to land on A:
+	// energy(A) < energy(C) < energy(B).
+	if !(costA.EnergyCost < costC.EnergyCost && costC.EnergyCost < costB.EnergyCost) {
+		t.Fatalf("scenario precondition failed: need A<C<B, got A=%.3f C=%.3f B=%.3f",
+			costA.EnergyCost, costC.EnergyCost, costB.EnergyCost)
+	}
+
+	// ── Phase 1: B asks the reasoner for the best peer to offload to ───────────
+
+	t.Log("Phase 1: B.RecommendPeer({task=pod-scheduling, source=node_self}).")
+	rec, err := b.sm.RecommendPeer(&types.OffloadContext{
+		TaskType:        "pod-scheduling",
+		SourceNodeID:    "node_self",
+		DataSizeBytes:   1024,
+		LatencyBudgetMs: 5000,
+	})
+	if err != nil {
+		t.Fatalf("RecommendPeer: %v", err)
+	}
+
+	// Resolve the recommended peer ID back to a name so the log reads cleanly.
+	winner := identifyWinner(t, b, a, c, rec.PeerID)
+	t.Logf("  → recommended peer: %s (ID=%s)", winner, rec.PeerID)
+	t.Logf("  → expected savings: %.3f", rec.ExpectedSavings)
+	t.Logf("  → rationale: %s", rec.Rationale)
+	t.Log("")
+
+	if winner != "A" {
+		t.Fatalf("expected B to recommend A (lowest cost); got %s", winner)
+	}
+	if rec.ExpectedSavings <= 0 {
+		t.Errorf("ExpectedSavings should be positive; got %.3f", rec.ExpectedSavings)
+	}
+
+	// ── Phase 2: B actually offloads to A via the wire ─────────────────────────
+
+	t.Log("Phase 2: B → A POST /offload with budgets {latency=5000ms, energy=∞}.")
+	preTrustForA := peerByURL(t, b.sm, a.srv.URL).Trust
+	resp, err := b.sm.PeerClient().Offload(context.Background(), a.srv.URL, &peers.OffloadRequest{
+		TaskType:        "pod-scheduling",
+		SourceNodeID:    "node_B",
+		DataSizeBytes:   1024,
+		LatencyBudgetMs: 5000,
+	})
+	if err != nil {
+		t.Fatalf("Offload call: %v", err)
+	}
+	t.Logf("  → A.Accepted=%t reason=%q expected_latency=%.3f expected_energy=%.3f",
+		resp.Accepted, resp.Reason, resp.ExpectedLatency, resp.ExpectedEnergy)
+	if !resp.Accepted {
+		t.Fatalf("expected A to accept; got rejection reason=%q", resp.Reason)
+	}
+
+	// Trust update on a successful offload: nudge upward.
+	const acceptDelta = 0.10
+	aDescOnB := peerByURL(t, b.sm, a.srv.URL)
+	if err := b.sm.Peers().UpdateTrust(aDescOnB.ID, acceptDelta); err != nil {
+		t.Fatal(err)
+	}
+	postTrustForA := peerByURL(t, b.sm, a.srv.URL).Trust
+	t.Logf("  → B's trust in A: %.3f → %.3f (delta=+%.2f on accept)", preTrustForA, postTrustForA, acceptDelta)
+	if postTrustForA <= preTrustForA {
+		t.Errorf("trust for A should increase after accept; got %.3f → %.3f", preTrustForA, postTrustForA)
+	}
+	t.Log("")
+
+	// ── Final summary table ────────────────────────────────────────────────────
+
+	t.Log("Final state:")
+	t.Log("  ┌──────┬──────────────┬──────────────────────────────────────────┐")
+	t.Log("  │ Node │ Self-energy  │ Role in this scenario                    │")
+	t.Log("  ├──────┼──────────────┼──────────────────────────────────────────┤")
+	t.Logf("  │  A   │   %.3f      │ idle — accepted offload from B           │", costA.EnergyCost)
+	t.Logf("  │  B   │   %.3f      │ loaded — chose A; trust(A) +%.2f         │", costB.EnergyCost, acceptDelta)
+	t.Logf("  │  C   │   %.3f      │ medium — eligible but not picked         │", costC.EnergyCost)
+	t.Log("  └──────┴──────────────┴──────────────────────────────────────────┘")
+	t.Log("")
+	t.Logf("B's peer table (post-offload):")
+	listB, _ := b.sm.Peers().List()
+	for _, p := range listB {
+		who := identifyURL(p.URL, a, c)
+		t.Logf("  %s  url=%s  trust=%.3f  n_observed=%d", who, p.URL, p.Trust, p.NObserved)
+	}
+}
+
+// identifyWinner looks up a peer ID against B's registry entries pointing at
+// A's and C's URLs so the test log can say "winner=A" instead of "winner=<hex>".
+func identifyWinner(t *testing.T, b, a, c *coordinationAgent, peerID string) string {
+	t.Helper()
+	for _, p := range mustList(t, b.sm.Peers()) {
+		if p.ID == peerID {
+			switch p.URL {
+			case a.srv.URL:
+				return "A"
+			case c.srv.URL:
+				return "C"
+			default:
+				return "?"
+			}
+		}
+	}
+	return "<unknown>"
+}
+
+// identifyURL returns the human-friendly label for a peer URL when we know
+// which agent (A, C) it points to. B's own entry isn't in B's registry.
+func identifyURL(url string, a, c *coordinationAgent) string {
+	switch url {
+	case a.srv.URL:
+		return "A"
+	case c.srv.URL:
+		return "C"
+	default:
+		return "?"
+	}
+}
+
+func mustList(t *testing.T, r *peers.Registry) []*peers.Descriptor {
+	t.Helper()
+	list, err := r.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return list
+}
+
+func peerByURL(t *testing.T, sm *semmap.SemanticMap, url string) *peers.Descriptor {
+	t.Helper()
+	d, err := sm.Peers().GetByURL(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d == nil {
+		t.Fatalf("peer with URL %s not registered", url)
+	}
+	return d
+}
 
 // findPriorWeightsFileForScenarios walks up to locate prior_weights.json so
 // scenarios are runnable from any working directory the test runner picks.
