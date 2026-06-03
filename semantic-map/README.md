@@ -388,20 +388,28 @@ disk/inode contexts, per-core `cpu.cpu` channels, …) are silently dropped
 by the playback layer. Extending the table later is a contained change in
 `cmd/replay/mapping/mapping.go`; the runner and CLI need no edits.
 
-#### Replay compare (cross-KD divergence)
+#### Replay compare — debug/inspection side-tool
 
-`replay compare` is the meta-analysis side of replay: instead of streaming
-one KD's rows into a live daemon, it builds **N independent SemanticMaps
-in one process** — one per KD, each seeded with its calibrated priors from
-`prior_weights.json` — feeds each only its own KD's parquet rows, then
-snapshots every map's final graph state and prints a per-edge × per-KD
-divergence table. The output is the dissertation's "which edges
-discriminate KDs?" figure as a reproducible artifact.
+> **Not a production-decision artifact.** `replay compare` is a debugging
+> and inspection tool. It exists so you can spot mapping bugs, sanity-check
+> that the same Bridge produces a consistent shape of evidence across
+> different real-shaped inputs, and see at a glance which edges respond to
+> which recorded telemetry. **It is not a comparison of Kubernetes
+> distributions for production decisions.** The parquets it consumes are
+> synthetic benchmark loads from the P1/P2 study — controlled exercise
+> runs, not natural deployment behavior — so any "divergence" the table
+> highlights reflects *the test harness inputs*, not anything publishable
+> about which KD is "better."
+
+Mechanically, the subcommand builds **N independent SemanticMaps in one
+process** — one per KD, each seeded with its calibrated priors from
+`prior_weights.json` — feeds each only its own KD's parquet rows, snapshots
+every map's final edge state, and prints a per-edge × per-KD table.
 
 ```bash
-./dev.sh replay compare --test idle --run 1                   # 5-KD divergence table
-./dev.sh replay compare --test idle --runs-all --json         # all 5 runs averaged, JSON
-./dev.sh replay compare --test cp_heavy_12client --csv > c.csv  # long-format CSV
+./dev.sh replay compare --test idle --run 1                       # 5-KD inspection table
+./dev.sh replay compare --test idle --runs-all --json             # 5-run average, JSON
+./dev.sh replay compare --test cp_heavy_12client --csv > c.csv    # long-format CSV
 ```
 
 ```text
@@ -413,18 +421,17 @@ discriminate KDs?" figure as a reproducible artifact.
       ...
 ```
 
-The `Effective` column for KD *i* is `(1 − confidence) · prior + confidence
-· ema` — the value the Reasoner would actually consume. `Range = max −
-min` flags the most discriminative edges; the bottom matter prints the
-diverged-edge count, per-KD convergence summary, top-3 most divergent
-edges, and a bridge-boundary count. JSON output omits wall-clock fields so
-`diff /tmp/c1.json /tmp/c2.json` is empty across two consecutive runs
-(deterministic compute is the reproducibility contract).
+`Effective` per KD = `(1 − confidence) · prior + confidence · ema`. `Range
+= max − min` highlights inputs that the Bridge propagated differently per
+KD. The bottom matter prints convergence counts, top-3 most divergent
+rows, and a bridge-boundary check. JSON output is deterministic across
+re-runs (`diff /tmp/c1.json /tmp/c2.json` is empty) — that's the only
+reproducibility contract.
 
 Compare is the deliberate exception to "cmd/replay only speaks HTTP" — it
-imports `pkg/profiles` and `pkg/semmap` directly because cross-KD
-comparison cannot share a daemon without cross-contamination. The
-rationale is documented at the top of `cmd/replay/compare/runner.go`.
+imports `pkg/profiles` and `pkg/semmap` directly because per-KD inspection
+cannot share a daemon without cross-contamination. The rationale is
+documented at the top of `cmd/replay/compare/runner.go`.
 
 ---
 

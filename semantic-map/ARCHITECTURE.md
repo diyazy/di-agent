@@ -307,37 +307,37 @@ The `(chart_context, metric_id, units)` → `MetricType` mapping table lives
 in `cmd/replay/mapping/mapping.go`. Extending it is a one-package change
 with no impact on the daemon or its profiles.
 
-#### In-process cross-KD compare (`cmd/replay/compare/`)
+#### `replay compare` — debug/inspection side-tool (`cmd/replay/compare/`)
 
-`replay compare` is the meta-analysis sibling to `replay run`/`all`. It
-exists for one figure that the daemon-streaming path cannot produce: a
-side-by-side **per-edge × per-KD divergence table**, asking *which edges
-discriminate KDs after replay?*
+**Auxiliary, not a research artifact.** `replay compare` is for spotting
+mapping bugs, sanity-checking that the Bridge produces a consistent shape
+of evidence across different real-shaped recorded inputs, and inspecting
+which edges respond to which telemetry — not for drawing production
+conclusions about "which KD is better." The parquets it consumes are
+synthetic benchmark loads from the P1/P2 study (controlled exercise
+runs), so cross-KD divergence in its output reflects *the recorded test
+harness inputs*, not natural deployment behavior.
+
+Mechanically, compare builds N independent `SemanticMap`s — one per KD,
+each seeded with that KD's calibrated priors from `prior_weights.json` —
+feeds each only its own KD's parquet rows, snapshots every map's final
+edge set, and emits a per-edge × per-KD inspection table (plus JSON/CSV
+for downstream tooling). `Effective = (1−c)·prior + c·ema` is what the
+Reasoner would consume; `Range = max − min` flags inputs that the Bridge
+propagated differently per KD.
 
 Compare deliberately **breaks the cmd/replay HTTP rule** and imports
-`pkg/profiles` + `pkg/semmap` directly. The reason is correctness:
-streaming k3s observations into the daemon after k0s leaves k0s's EMAs
-contaminated, defeating the whole point of cross-KD comparison.
-`replay compare` therefore builds N independent `SemanticMap`s — one per
-KD, each seeded with that KD's calibrated priors from
-`prior_weights.json` — and feeds each only its own KD's parquet rows,
-all in one process. It then snapshots every map's final edge set,
-computes per-edge effective weight (`Effective = (1−c)·prior + c·ema` —
-what the Reasoner actually consumes), and emits a table / JSON / CSV
-sorted by cross-KD range (most discriminative edges first).
-
-The boundary is meta-analysis-only. The general-purpose `replay run`
-and `replay all` subcommands stay HTTP-based: they feed a *single*
-daemon and that's their right tool. If a future contributor adds another
-HTTP-only replay subcommand it does not need to follow compare's
-pattern; if another *meta-analysis* tool appears (e.g. cross-test
-comparison, or sensitivity sweeps), it can reuse compare's pattern.
+`pkg/profiles` + `pkg/semmap` directly. The reason is mechanism
+correctness: streaming k3s observations into a single daemon after k0s
+leaves k0s's EMAs contaminated, so per-KD inspection in one process
+needs isolated maps. The general-purpose `replay run` and `replay all`
+subcommands stay HTTP-based.
 
 EventIDs reuse `playback.EventID` so compare's outputs are deterministic
-across re-runs and so a future `replay run` against the same parquet
-remains a no-op against an already-loaded daemon. The acceptance proof
-is `diff /tmp/c1.json /tmp/c2.json == ∅` over two consecutive
-`replay compare --json` invocations.
+across re-runs (`diff /tmp/c1.json /tmp/c2.json == ∅` over two
+consecutive `replay compare --json` invocations) — that's the only
+reproducibility contract it makes. The role of this tool in the
+dissertation arc is *engineering hygiene*, not a published figure.
 
 ### Implementation status
 

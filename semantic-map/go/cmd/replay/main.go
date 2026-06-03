@@ -18,13 +18,18 @@
 //
 //	replay compare --test T [--run N | --runs-all] [--kds K1,K2,...] [--data-dir D]
 //	               [--priors PATH] [--json|--csv] [--node-filter h1,h2]
-//	               Replay one (or all 5) runs of T for several KDs in-process,
-//	               snapshot final graph state, print per-edge × per-KD
-//	               divergence table.
+//	               DEBUG / INSPECTION side-tool. Replays one (or all 5) runs
+//	               of T for several KDs in-process and prints a per-edge ×
+//	               per-KD inspection table. Use for spotting mapping bugs
+//	               and verifying mechanism consistency across recorded
+//	               inputs. NOT a production-decision artifact: the parquets
+//	               are synthetic benchmark loads, so any "divergence" the
+//	               table flags reflects the recorded test harness, not
+//	               natural deployment behavior.
 //
 // All subcommands except `compare` speak HTTP. `compare` runs in-process
-// (it has to: cross-KD comparison needs isolated SemanticMaps; see
-// cmd/replay/compare for the rationale). The binary builds standalone
+// (per-KD inspection needs isolated SemanticMaps; see cmd/replay/compare
+// for the rationale). The binary builds standalone
 // (no daemon dependency at build time) and imports the wire DTOs in
 // cmd/replay/client plus the in-process Build+IngestSample path used by
 // compare via pkg/profiles + pkg/semmap.
@@ -120,6 +125,8 @@ Usage:
   replay list    [--data-dir D]
   replay compare --test T [--run N | --runs-all] [--kds K1,K2,...] [--data-dir D]
                  [--priors PATH] [--json|--csv] [--node-filter h1,h2]
+                 (DEBUG / INSPECTION TOOL — not a production-decision artifact;
+                  see cmd/replay/compare for the role boundary)
 
 Examples:
   replay run --kd k0s --test idle --run 1 --speed 60
@@ -127,7 +134,7 @@ Examples:
   replay all --kd k0s --speed 0
   replay probe --kd k0s --test idle --run 1 | head -40
   replay list
-  replay compare --test idle --run 1
+  replay compare --test idle --run 1                       # inspection table
   replay compare --test idle --runs-all --json | jq '.divergence[0:3]'
   replay compare --test cp_heavy_12client --kds k0s,k3s,k8s --csv > compare.csv
 
