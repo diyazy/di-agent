@@ -307,6 +307,38 @@ The `(chart_context, metric_id, units)` → `MetricType` mapping table lives
 in `cmd/replay/mapping/mapping.go`. Extending it is a one-package change
 with no impact on the daemon or its profiles.
 
+#### In-process cross-KD compare (`cmd/replay/compare/`)
+
+`replay compare` is the meta-analysis sibling to `replay run`/`all`. It
+exists for one figure that the daemon-streaming path cannot produce: a
+side-by-side **per-edge × per-KD divergence table**, asking *which edges
+discriminate KDs after replay?*
+
+Compare deliberately **breaks the cmd/replay HTTP rule** and imports
+`pkg/profiles` + `pkg/semmap` directly. The reason is correctness:
+streaming k3s observations into the daemon after k0s leaves k0s's EMAs
+contaminated, defeating the whole point of cross-KD comparison.
+`replay compare` therefore builds N independent `SemanticMap`s — one per
+KD, each seeded with that KD's calibrated priors from
+`prior_weights.json` — and feeds each only its own KD's parquet rows,
+all in one process. It then snapshots every map's final edge set,
+computes per-edge effective weight (`Effective = (1−c)·prior + c·ema` —
+what the Reasoner actually consumes), and emits a table / JSON / CSV
+sorted by cross-KD range (most discriminative edges first).
+
+The boundary is meta-analysis-only. The general-purpose `replay run`
+and `replay all` subcommands stay HTTP-based: they feed a *single*
+daemon and that's their right tool. If a future contributor adds another
+HTTP-only replay subcommand it does not need to follow compare's
+pattern; if another *meta-analysis* tool appears (e.g. cross-test
+comparison, or sensitivity sweeps), it can reuse compare's pattern.
+
+EventIDs reuse `playback.EventID` so compare's outputs are deterministic
+across re-runs and so a future `replay run` against the same parquet
+remains a no-op against an already-loaded daemon. The acceptance proof
+is `diff /tmp/c1.json /tmp/c2.json == ∅` over two consecutive
+`replay compare --json` invocations.
+
 ### Implementation status
 
 The Bridge ships as a stateless function in `go/pkg/semmap/bridge.go::Bridge`, exposed on the facade as `SemanticMap.IngestSample`. The autonomous scheduler that ticks the configured collector and feeds each sample through the Bridge lives in `go/cmd/agent/main.go::runCollectionLoop`; it is started by `startCollectionLoop` once the daemon has built its profile. Both pieces are profile-agnostic — adding a new collector means returning it from a profile build function, no changes to the loop or the Bridge.
