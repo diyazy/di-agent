@@ -27,6 +27,11 @@ package main
 // /candidates/{id}/confirm          POST    —                              204
 // /candidates/{id}/reject           POST    —                              204
 // /candidates/{id}/defer            POST    —                              204
+// /peers                            GET     —                              200 []PeerDTO
+// /peers                            POST    AddPeerRequest                 200 PeerDTO
+// /peers/{id}                       DELETE  —                              204
+// /peers/{id}/trust                 POST    SetTrustRequest                204
+// /offload                          POST    OffloadHTTPRequest             200 OffloadHTTPResponse
 // /ui/...                           GET     —                              200 (embedded HTML)
 //
 // Endpoints above the divider are pre-existing and keep their original
@@ -38,12 +43,14 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"runtime"
 	"strings"
 	"time"
 
+	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/semmap"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
@@ -61,6 +68,7 @@ func registerRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 	registerExistingRoutes(mux, sm)
 	registerReadRoutes(mux, sm)
 	registerMutationRoutes(mux, sm)
+	registerPeerRoutes(mux, sm)
 	registerStaticRoutes(mux)
 }
 
@@ -538,4 +546,153 @@ func requireJSON(r *http.Request) error {
 		return errors.New("Content-Type must be application/json")
 	}
 	return nil
+}
+
+// registerPeerRoutes wires the multi-agent coordination endpoints:
+//
+//	GET    /peers           list every registered peer
+//	POST   /peers           register a new peer (idempotent on URL)
+//	DELETE /peers/{id}      unregister a peer
+//	POST   /peers/{id}/trust override a peer's trust (test + operator path)
+//	POST   /offload         the peer-side receiver of an offload proposal
+//
+// /offload is the *server* side of the protocol: an inbound request from
+// another agent that wants to know if this agent can run their task within
+// the requested latency/energy budgets. The handler computes its own
+// CostOfAction, compares against the budgets, and returns accept/reject
+// with the expected latency/energy so the source agent can update trust.
+// It does NOT execute any task — execution is a future (P7) concern.
+func registerPeerRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
+	mux.HandleFunc("GET /peers", func(w http.ResponseWriter, r *http.Request) {
+		list, err := sm.Peers().List()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		out := make([]PeerDTO, 0, len(list))
+		for _, p := range list {
+			out = append(out, peerToDTO(p))
+		}
+		writeJSON(w, out)
+	})
+
+	mux.HandleFunc("POST /peers", func(w http.ResponseWriter, r *http.Request) {
+		if err := requireJSON(r); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		var req AddPeerRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if strings.TrimSpace(req.URL) == "" {
+			writeError(w, http.StatusBadRequest, "url is required")
+			return
+		}
+		d, err := sm.Peers().Add(req.URL, req.Note)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(peerToDTO(d))
+	})
+
+	mux.HandleFunc("DELETE /peers/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if err := sm.Peers().Remove(id); err != nil {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("POST /peers/{id}/trust", func(w http.ResponseWriter, r *http.Request) {
+		if err := requireJSON(r); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		id := r.PathValue("id")
+		var req SetTrustRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := sm.Peers().SetTrust(id, req.Value); err != nil {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("POST /offload", func(w http.ResponseWriter, r *http.Request) {
+		if err := requireJSON(r); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		var req OffloadHTTPRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		resp := decideOffload(sm, &req)
+		writeJSON(w, resp)
+	})
+}
+
+// peerToDTO converts an internal peers.Descriptor to its wire form.
+func peerToDTO(d *peers.Descriptor) PeerDTO {
+	return PeerDTO{
+		ID:        d.ID,
+		URL:       d.URL,
+		Trust:     d.Trust,
+		NObserved: d.NObserved,
+		LastSeen:  d.LastSeen,
+		Note:      d.Note,
+	}
+}
+
+// decideOffload is the peer-side accept/reject logic. It calls CostOfAction
+// once to estimate the cost of this task on the local agent, then compares
+// against the requested budgets:
+//
+//   - If LatencyBudgetMs > 0 and the local LatencyEstimate exceeds it → reject.
+//   - If EnergyBudgetJoules is set and the local EnergyCost exceeds it → reject.
+//   - Otherwise → accept.
+//
+// The decision is informational only — we do not schedule anything. Execution
+// is a P7 concern; this handler exists so the source agent can record an
+// outcome and adjust trust accordingly.
+func decideOffload(sm *semmap.SemanticMap, req *OffloadHTTPRequest) OffloadHTTPResponse {
+	cost, err := sm.CostOfAction(req.TaskType, req.SourceNodeID)
+	if err != nil {
+		return OffloadHTTPResponse{
+			Accepted: false,
+			Reason:   "cost evaluation failed: " + err.Error(),
+		}
+	}
+	if req.LatencyBudgetMs > 0 && cost.LatencyEstimate > req.LatencyBudgetMs {
+		return OffloadHTTPResponse{
+			Accepted:        false,
+			Reason:          fmt.Sprintf("latency %.2fms exceeds budget %.2fms", cost.LatencyEstimate, req.LatencyBudgetMs),
+			ExpectedLatency: cost.LatencyEstimate,
+			ExpectedEnergy:  cost.EnergyCost,
+		}
+	}
+	if req.EnergyBudgetJoules != nil && cost.EnergyCost > *req.EnergyBudgetJoules {
+		return OffloadHTTPResponse{
+			Accepted:        false,
+			Reason:          fmt.Sprintf("energy %.3fJ exceeds budget %.3fJ", cost.EnergyCost, *req.EnergyBudgetJoules),
+			ExpectedLatency: cost.LatencyEstimate,
+			ExpectedEnergy:  cost.EnergyCost,
+		}
+	}
+	return OffloadHTTPResponse{
+		Accepted:        true,
+		Reason:          "within budget",
+		ExpectedLatency: cost.LatencyEstimate,
+		ExpectedEnergy:  cost.EnergyCost,
+	}
 }

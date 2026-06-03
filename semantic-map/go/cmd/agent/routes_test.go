@@ -613,3 +613,298 @@ func TestSetStrength_UnknownProposition_Returns500WithErrorJSON(t *testing.T) {
 		t.Error("error body empty")
 	}
 }
+
+// ── /peers and /offload (multi-agent coordination) ───────────────────────────
+
+func TestPeers_AddListRemove(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+
+	// Initially empty.
+	var list []PeerDTO
+	getJSON(t, base+"/peers", &list)
+	if len(list) != 0 {
+		t.Errorf("initial /peers: got %d entries, want 0", len(list))
+	}
+
+	// Add one peer.
+	resp := postJSON(t, base+"/peers", AddPeerRequest{URL: "http://node_1:8080", Note: "rpi-1"})
+	if resp.StatusCode != 200 {
+		t.Fatalf("POST /peers: %s", body(resp))
+	}
+	var added PeerDTO
+	if err := json.NewDecoder(resp.Body).Decode(&added); err != nil {
+		t.Fatalf("decode added: %v", err)
+	}
+	resp.Body.Close()
+	if added.URL != "http://node_1:8080" {
+		t.Errorf("added URL: got %q", added.URL)
+	}
+	if added.Trust != 0.5 {
+		t.Errorf("added trust: got %.3f, want 0.5 default", added.Trust)
+	}
+	if added.Note != "rpi-1" {
+		t.Errorf("added note: got %q", added.Note)
+	}
+
+	// List shows it.
+	getJSON(t, base+"/peers", &list)
+	if len(list) != 1 {
+		t.Fatalf("after add, /peers: got %d, want 1", len(list))
+	}
+
+	// Re-adding the same URL is idempotent (same ID, no extra row).
+	resp = postJSON(t, base+"/peers", AddPeerRequest{URL: "http://node_1:8080", Note: "different"})
+	resp.Body.Close()
+	getJSON(t, base+"/peers", &list)
+	if len(list) != 1 {
+		t.Errorf("after duplicate POST, /peers: got %d, want 1 (idempotent on URL)", len(list))
+	}
+
+	// Remove via DELETE.
+	req, _ := http.NewRequest(http.MethodDelete, base+"/peers/"+added.ID, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 204 {
+		t.Errorf("DELETE /peers/{id}: got %d, want 204 (%s)", resp.StatusCode, body(resp))
+	}
+	resp.Body.Close()
+
+	getJSON(t, base+"/peers", &list)
+	if len(list) != 0 {
+		t.Errorf("after delete, /peers: got %d, want 0", len(list))
+	}
+}
+
+func TestPeers_TrustSet(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	resp := postJSON(t, base+"/peers", AddPeerRequest{URL: "http://node_X:8080"})
+	if resp.StatusCode != 200 {
+		t.Fatalf("add: %s", body(resp))
+	}
+	var added PeerDTO
+	_ = json.NewDecoder(resp.Body).Decode(&added)
+	resp.Body.Close()
+
+	// Override trust.
+	resp = postJSON(t, base+"/peers/"+added.ID+"/trust", SetTrustRequest{Value: 0.85})
+	if resp.StatusCode != 204 {
+		t.Fatalf("trust set: %s", body(resp))
+	}
+	resp.Body.Close()
+
+	var list []PeerDTO
+	getJSON(t, base+"/peers", &list)
+	if len(list) != 1 {
+		t.Fatalf("list len: %d", len(list))
+	}
+	if list[0].Trust != 0.85 {
+		t.Errorf("trust after override: got %.3f, want 0.85", list[0].Trust)
+	}
+}
+
+func TestPeers_AddMissingURL_Returns400(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	resp := postJSON(t, base+"/peers", AddPeerRequest{URL: ""})
+	defer resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Errorf("empty URL: got %d, want 400 (%s)", resp.StatusCode, body(resp))
+	}
+	var er ErrorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&er); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.ToLower(er.Error), "url") {
+		t.Errorf("error body should mention url: %q", er.Error)
+	}
+}
+
+func TestPeers_DeleteUnknownReturns404(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	req, _ := http.NewRequest(http.MethodDelete, base+"/peers/does-not-exist", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Errorf("DELETE unknown: got %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestOffload_AcceptWithinBudget(t *testing.T) {
+	base, sm, cleanup := newTestAgent(t)
+	defer cleanup()
+
+	// Probe local cost to size budgets above its actual values.
+	cost, err := sm.CostOfAction("pod-scheduling", "node_self")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := postJSON(t, base+"/offload", OffloadHTTPRequest{
+		TaskType:        "pod-scheduling",
+		SourceNodeID:    "node_self",
+		DataSizeBytes:   1024,
+		LatencyBudgetMs: cost.LatencyEstimate*2 + 100, // generous
+	})
+	if resp.StatusCode != 200 {
+		t.Fatalf("/offload: %s", body(resp))
+	}
+	var out OffloadHTTPResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !out.Accepted {
+		t.Errorf("Accepted: got false, want true (reason=%s; latency=%.3f budget=%.3f)",
+			out.Reason, out.ExpectedLatency, cost.LatencyEstimate*2+100)
+	}
+	if out.ExpectedLatency != cost.LatencyEstimate {
+		t.Errorf("ExpectedLatency: got %.3f, want %.3f", out.ExpectedLatency, cost.LatencyEstimate)
+	}
+}
+
+// drivePositiveCost biases EMAs so that both EnergyCost (sum over edges
+// into RC) and LatencyEstimate (sum over edges into PS) come out > 0.
+//
+// Without biasing, the bootstrap propositions sum to ≤0 (positives cancel
+// negatives) and both costs clamp to zero — making budget rejections
+// untestable. We push the dominant positive-target edges high and the
+// negative-target edges low, plus drive CO→PS into negative territory so
+// its (-1)*(-effective) = +effective contribution lifts the latency
+// estimate over zero. RC→PS is a conflict pair (P2−/P3+) sharing one
+// (from, to); Ingest updates both EMAs identically, so the pair always
+// contributes net zero regardless of bias direction — useful here, since
+// it means LatencyEstimate is driven entirely by CO→PS once the third edge
+// is biased.
+//
+// alpha/convergence are tuned in newOffloadTestAgent to make the EMA reach
+// usable values within ~200 ticks.
+func drivePositiveCost(t *testing.T, sm *semmap.SemanticMap) {
+	t.Helper()
+	const N = 200
+	for i := 0; i < N; i++ {
+		// RC inputs: drive the one positive (P1: SC→RC) high, the two
+		// negatives (P8: MU→RC, P10: PS→RC) low.
+		if err := sm.Ingest("SC", "RC", 0.95, fmt.Sprintf("bias-sc-rc-%d", i)); err != nil {
+			t.Fatal(err)
+		}
+		if err := sm.Ingest("MU", "RC", 0.05, fmt.Sprintf("bias-mu-rc-%d", i)); err != nil {
+			t.Fatal(err)
+		}
+		if err := sm.Ingest("PS", "RC", 0.05, fmt.Sprintf("bias-ps-rc-%d", i)); err != nil {
+			t.Fatal(err)
+		}
+		// PS inputs: CO→PS (P13, negative) at -1.0 → contribution = +1.0.
+		// RC→PS conflict pair cancels at any observed value.
+		if err := sm.Ingest("CO", "PS", -1.0, fmt.Sprintf("bias-co-ps-%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// newOffloadTestAgent returns a test agent tuned for the /offload reject
+// tests: alpha=0.5 and convergence=100 so 200 biasing ticks push EMAs close
+// to their targets and confidence saturates well above 0.5.
+func newOffloadTestAgent(t *testing.T) (baseURL string, sm *semmap.SemanticMap, cleanup func()) {
+	t.Helper()
+	sm, _, err := profiles.Build("edge-minimal", profiles.Config{
+		EMAAlpha:             0.5,
+		ConvergenceThreshold: 100,
+		MinTrustScore:        0.5,
+	})
+	if err != nil {
+		t.Fatalf("profiles.Build: %v", err)
+	}
+	mux := http.NewServeMux()
+	registerRoutes(mux, sm)
+	srv := httptest.NewServer(mux)
+	return srv.URL, sm, srv.Close
+}
+
+func TestOffload_RejectExceedsLatencyBudget(t *testing.T) {
+	base, sm, cleanup := newOffloadTestAgent(t)
+	defer cleanup()
+	drivePositiveCost(t, sm)
+
+	cost, err := sm.CostOfAction("pod-scheduling", "node_self")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cost.LatencyEstimate <= 0 {
+		t.Fatalf("test precondition: latency=%.3f must be > 0 after biasing", cost.LatencyEstimate)
+	}
+
+	resp := postJSON(t, base+"/offload", OffloadHTTPRequest{
+		TaskType:        "pod-scheduling",
+		SourceNodeID:    "node_self",
+		DataSizeBytes:   1024,
+		LatencyBudgetMs: cost.LatencyEstimate / 10, // tight
+	})
+	if resp.StatusCode != 200 {
+		t.Fatalf("/offload: %s", body(resp))
+	}
+	var out OffloadHTTPResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if out.Accepted {
+		t.Errorf("expected reject; got Accepted=true reason=%q (latency=%.3f budget=%.3f)",
+			out.Reason, out.ExpectedLatency, cost.LatencyEstimate/10)
+	}
+	if !strings.Contains(out.Reason, "latency") {
+		t.Errorf("reject reason should mention latency; got %q", out.Reason)
+	}
+}
+
+func TestOffload_RejectExceedsEnergyBudget(t *testing.T) {
+	base, sm, cleanup := newOffloadTestAgent(t)
+	defer cleanup()
+	drivePositiveCost(t, sm)
+
+	cost, err := sm.CostOfAction("pod-scheduling", "node_self")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cost.EnergyCost <= 0 {
+		t.Fatalf("test precondition: energy=%.3f must be > 0 after biasing", cost.EnergyCost)
+	}
+	tight := cost.EnergyCost / 10
+	resp := postJSON(t, base+"/offload", OffloadHTTPRequest{
+		TaskType:           "pod-scheduling",
+		SourceNodeID:       "node_self",
+		DataSizeBytes:      1024,
+		LatencyBudgetMs:    1e9, // unbounded latency
+		EnergyBudgetJoules: &tight,
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("/offload: %s", body(resp))
+	}
+	var out OffloadHTTPResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Accepted {
+		t.Errorf("expected reject on energy budget; got Accepted=true reason=%q", out.Reason)
+	}
+	if !strings.Contains(out.Reason, "energy") {
+		t.Errorf("reject reason should mention energy; got %q", out.Reason)
+	}
+}
+
+func TestOffload_RequiresJSON(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	resp := postRaw(t, base+"/offload", `{"task_type":"x"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Errorf("missing Content-Type: got %d, want 400", resp.StatusCode)
+	}
+}

@@ -146,6 +146,49 @@ type ErrorResponse struct {
 	Error string `json:"error"`
 }
 
+// ── Peer DTOs ─────────────────────────────────────────────────────────────────
+
+// PeerDTO mirrors peers.Descriptor for wire output.
+type PeerDTO struct {
+	ID        string    `json:"id"`
+	URL       string    `json:"url"`
+	Trust     float64   `json:"trust"`
+	NObserved int       `json:"n_observed"`
+	LastSeen  time.Time `json:"last_seen"`
+	Note      string    `json:"note,omitempty"`
+}
+
+// AddPeerRequest is the body of POST /peers.
+type AddPeerRequest struct {
+	URL  string `json:"url"`
+	Note string `json:"note,omitempty"`
+}
+
+// SetTrustRequest is the body of POST /peers/{id}/trust.
+type SetTrustRequest struct {
+	Value float64 `json:"value"`
+}
+
+// OffloadHTTPRequest is the body of POST /offload — the peer-side receiver of
+// an offload proposal. Named with the HTTP prefix so it does not collide with
+// pkg/peers.OffloadRequest (this is the server-side DTO; that is the
+// outbound-client DTO).
+type OffloadHTTPRequest struct {
+	TaskType           string   `json:"task_type"`
+	SourceNodeID       string   `json:"source_node_id"`
+	DataSizeBytes      int64    `json:"data_size_bytes"`
+	LatencyBudgetMs    float64  `json:"latency_budget_ms"`
+	EnergyBudgetJoules *float64 `json:"energy_budget_joules,omitempty"`
+}
+
+// OffloadHTTPResponse is the body of POST /offload — the peer's decision.
+type OffloadHTTPResponse struct {
+	Accepted        bool    `json:"accepted"`
+	Reason          string  `json:"reason,omitempty"`
+	ExpectedLatency float64 `json:"expected_latency"`
+	ExpectedEnergy  float64 `json:"expected_energy"`
+}
+
 // ── Mappers ───────────────────────────────────────────────────────────────────
 
 // directionToString converts the internal Direction enum to its wire form.
