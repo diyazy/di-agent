@@ -50,7 +50,7 @@ func newScenarioAgent(t *testing.T) *scenarioAgent {
 	storage := minimal.NewInMemoryStorage()
 	ontology := minimal.NewStaticDiSelectOntology()
 	updater := minimal.NewEMAUpdater(storage, 0.2, 500)
-	reasoner := minimal.NewRuleEngineReasoner(storage, ontology, 0.5)
+	reasoner := minimal.NewRuleEngineReasoner(storage, ontology, 0.5, nil, nil)
 	proposer := minimal.NewDisabledProposer()
 
 	seedReasonerState(t, storage, ontology)

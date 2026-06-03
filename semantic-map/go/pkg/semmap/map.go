@@ -6,18 +6,28 @@ import (
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/contracts"
+	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
-// SemanticMap wires the five contracts and exposes the agent API.
+// SemanticMap wires the five contracts and exposes the agent API. It also
+// holds the peer coordination handles (peers.Registry, peers.Client) so the
+// HTTP layer and the reasoner share a single source of truth for peers.
 type SemanticMap struct {
 	storage  contracts.StorageContract
 	ontology contracts.OntologyContract
 	updater  contracts.UpdaterContract
 	reasoner contracts.ReasonerContract
 	proposer contracts.ProposerContract
+
+	peers *peers.Registry
+	peerc *peers.Client
 }
 
+// New constructs a SemanticMap without peer coordination. The facade still
+// satisfies its peer-facing methods (Peers, PeerClient) by lazily allocating
+// an empty registry + default client on first access — preserving backward
+// compatibility for callers that don't yet wire peers explicitly.
 func New(
 	storage contracts.StorageContract,
 	ontology contracts.OntologyContract,
@@ -25,7 +35,50 @@ func New(
 	reasoner contracts.ReasonerContract,
 	proposer contracts.ProposerContract,
 ) *SemanticMap {
-	return &SemanticMap{storage, ontology, updater, reasoner, proposer}
+	return &SemanticMap{storage: storage, ontology: ontology, updater: updater, reasoner: reasoner, proposer: proposer}
+}
+
+// NewWithPeers is the peer-aware constructor used by profiles.Build. Both
+// peerRegistry and peerClient may be nil — Peers() and PeerClient() lazily
+// fall back to fresh instances in that case.
+func NewWithPeers(
+	storage contracts.StorageContract,
+	ontology contracts.OntologyContract,
+	updater contracts.UpdaterContract,
+	reasoner contracts.ReasonerContract,
+	proposer contracts.ProposerContract,
+	peerRegistry *peers.Registry,
+	peerClient *peers.Client,
+) *SemanticMap {
+	return &SemanticMap{
+		storage:  storage,
+		ontology: ontology,
+		updater:  updater,
+		reasoner: reasoner,
+		proposer: proposer,
+		peers:    peerRegistry,
+		peerc:    peerClient,
+	}
+}
+
+// Peers returns the peer registry attached to this map. If no registry was
+// wired at construction time, a fresh empty one is allocated and cached so
+// callers see a stable reference.
+func (m *SemanticMap) Peers() *peers.Registry {
+	if m.peers == nil {
+		m.peers = peers.NewRegistry()
+	}
+	return m.peers
+}
+
+// PeerClient returns the HTTP client used for outbound peer calls. If no
+// client was wired, a default client with a 2s timeout is allocated and
+// cached on first access.
+func (m *SemanticMap) PeerClient() *peers.Client {
+	if m.peerc == nil {
+		m.peerc = peers.NewClient(2 * time.Second)
+	}
+	return m.peerc
 }
 
 // ── Agent queries ─────────────────────────────────────────────────────────────
