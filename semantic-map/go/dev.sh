@@ -28,7 +28,20 @@ CONVERGENCE="${CONVERGENCE:-500}"
 
 AGENT_BIN="/tmp/semantic-map-agent"
 MAPCTL_BIN="/tmp/semantic-map-mapctl"
+REPLAY_BIN="/tmp/semantic-map-replay"
 LOG_FILE="/tmp/semantic-map-agent.log"
+
+# Where the parquet dataset lives. Falls back to walking up from the
+# semantic-map/go directory; the replay binary itself does a second walk
+# from cwd, so this default just keeps `./dev.sh replay …` working from
+# any directory in the mega-research tree.
+DATA_DIR_DEFAULT="$(cd "$SCRIPT_DIR" 2>/dev/null && \
+    d="$PWD"; \
+    while [[ "$d" != "/" ]]; do \
+        if [[ -d "$d/multidimensional-analysis/data/raw" ]]; then echo "$d/multidimensional-analysis/data/raw"; break; fi; \
+        d="$(dirname "$d")"; \
+    done)"
+DATA_DIR="${DATA_DIR:-$DATA_DIR_DEFAULT}"
 
 # ── Output helpers ──────────────────────────────────────────────────────────
 
@@ -66,7 +79,9 @@ cmd_build() {
     go build -o "$AGENT_BIN" ./cmd/agent
     step "go build -o $MAPCTL_BIN ./cmd/mapctl"
     go build -o "$MAPCTL_BIN" ./cmd/mapctl
-    info "built: $AGENT_BIN, $MAPCTL_BIN"
+    step "go build -o $REPLAY_BIN ./cmd/replay"
+    go build -o "$REPLAY_BIN" ./cmd/replay
+    info "built: $AGENT_BIN, $MAPCTL_BIN, $REPLAY_BIN"
 }
 
 cmd_start() {
@@ -166,6 +181,24 @@ cmd_cli() {
         cmd_build
     fi
     "$MAPCTL_BIN" --addr "http://localhost:$PORT" "$@"
+}
+
+# cmd_replay proxies to the replay binary with --addr and --data-dir already
+# set so the user only has to type the interesting flags. The replay tool
+# resolves --data-dir on its own if we don't pass one (walks up from cwd);
+# we pass it explicitly when DATA_DIR is non-empty so the inner-loop is
+# unambiguous regardless of where the user invoked dev.sh.
+cmd_replay() {
+    if [[ ! -x "$REPLAY_BIN" ]]; then
+        warn "no replay binary — building first"
+        cmd_build
+    fi
+    local -a args=("$@")
+    args+=(--addr "http://localhost:$PORT")
+    if [[ -n "$DATA_DIR" ]]; then
+        args+=(--data-dir "$DATA_DIR")
+    fi
+    "$REPLAY_BIN" "${args[@]}"
 }
 
 cmd_test() {
@@ -323,8 +356,8 @@ demo_filter_test_output() {
 
 cmd_clean() {
     cmd_stop
-    step "rm -f $AGENT_BIN $MAPCTL_BIN $LOG_FILE"
-    rm -f "$AGENT_BIN" "$MAPCTL_BIN" "$LOG_FILE"
+    step "rm -f $AGENT_BIN $MAPCTL_BIN $REPLAY_BIN $LOG_FILE"
+    rm -f "$AGENT_BIN" "$MAPCTL_BIN" "$REPLAY_BIN" "$LOG_FILE"
     step "go clean -cache"
     go clean -cache
     info "cleaned"
@@ -338,7 +371,7 @@ ${BOLD}Usage:${RESET}
   ./dev.sh <command> [args]
 
 ${BOLD}Commands:${RESET}
-  ${BOLD}build${RESET}      Build agent + mapctl into /tmp
+  ${BOLD}build${RESET}      Build agent + mapctl + replay into /tmp
   ${BOLD}start${RESET}      Start the daemon (no-op if already running)
   ${BOLD}stop${RESET}       Kill the running daemon
   ${BOLD}restart${RESET}    Stop → build → start
@@ -346,6 +379,7 @@ ${BOLD}Commands:${RESET}
   ${BOLD}logs${RESET}       Tail $LOG_FILE
   ${BOLD}ui${RESET}         Open http://localhost:\$PORT/ui/ (starts daemon if needed)
   ${BOLD}cli${RESET} ...    Run mapctl with --addr already set, e.g. ./dev.sh cli graph
+  ${BOLD}replay${RESET} ... Run replay with --addr + --data-dir already set, e.g. ./dev.sh replay run --kd k0s --test idle --run 1 --speed 60
   ${BOLD}test${RESET}       go test ./... + go vet ./...
   ${BOLD}smoke${RESET}      End-to-end smoke (curl + mapctl) against the running daemon
   ${BOLD}demo${RESET}       Guided tour: build → graph → 12 scenarios → UI (use --quick, --paper, --no-ui)
@@ -367,6 +401,11 @@ ${BOLD}Examples:${RESET}
   ./dev.sh restart                 # rebuild + restart in one command
   ./dev.sh cli graph               # mapctl --addr http://localhost:8080 graph
   ./dev.sh cli deprecate P1 "test"
+  ./dev.sh replay list             # inventory of {kd}/{test}_runN.parquet
+  ./dev.sh replay probe --kd k0s --test idle --run 1 | head -40
+  ./dev.sh replay run   --kd k0s --test idle --run 1 --speed 60
+  ./dev.sh replay run   --kd k0s --test idle --run 1 --speed 0   # max throughput
+  ./dev.sh replay all   --kd k0s --speed 0                       # all 9 tests x 5 runs
   ./dev.sh ui                      # browser viewer (starts daemon if needed)
   KD=k0s ./dev.sh restart          # use per-KD priors
   PORT=9000 ./dev.sh start         # custom port
@@ -389,6 +428,7 @@ case "$CMD" in
     logs)           cmd_logs ;;
     ui)             cmd_ui ;;
     cli)            cmd_cli "$@" ;;
+    replay)         cmd_replay "$@" ;;
     test)           cmd_test ;;
     smoke)          cmd_smoke ;;
     demo)           cmd_demo "$@" ;;
