@@ -164,3 +164,26 @@ type CandidateEdge struct {
 	DeploymentsSeen int     `json:"DeploymentsSeen"`
 	Status          int     `json:"Status"`
 }
+
+// ── Peer coordination DTOs ────────────────────────────────────────────────────
+
+// PeerDTO mirrors the server's PeerDTO.
+type PeerDTO struct {
+	ID        string    `json:"id"`
+	URL       string    `json:"url"`
+	Trust     float64   `json:"trust"`
+	NObserved int       `json:"n_observed"`
+	LastSeen  time.Time `json:"last_seen"`
+	Note      string    `json:"note,omitempty"`
+}
+
+// AddPeerRequest is the body of POST /peers.
+type AddPeerRequest struct {
+	URL  string `json:"url"`
+	Note string `json:"note,omitempty"`
+}
+
+// SetTrustRequest is the body of POST /peers/{id}/trust.
+type SetTrustRequest struct {
+	Value float64 `json:"value"`
+}

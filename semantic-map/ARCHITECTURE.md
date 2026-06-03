@@ -22,6 +22,7 @@ Design rationale and decision record. Update this file when a contract, profile,
 - [7. Adding a New Profile](#7-adding-a-new-profile)
 - [8. Connection to Research](#8-connection-to-research)
 - [9. Control Surface](#9-control-surface)
+- [10. Coordination](#10-coordination)
 
 ---
 
@@ -544,3 +545,63 @@ Each layer answers a different question:
 - **Web UI** answers: "what can a reviewer see and click, expressed visually?"
 
 Collapsing them — e.g. embedding HTML rendering inside Go handlers, or building a TUI that calls `pkg/semmap` directly — would couple the daemon to its consumers. Keeping the HTTP boundary firm means the Netdata adapter (step 5 in `research-docs/SEMANTIC-MAP-STATUS.md`) can land without touching the control surface, and any future client (mobile, TUI, fleet view) can be added without changing the daemon.
+
+---
+
+## 10. Coordination
+
+The dissertation calls this work a *Context-Aware Agentic Framework for **Decentralized** Edge Computing*. Single-agent EMA convergence is the mechanism; multi-agent coordination is the spine. Without it, `RecommendPeer` is dead code, "decentralized" is aspirational, and P7 has nothing to build on.
+
+### The peer registry — concrete, not a contract
+
+In v1 the peer registry lives at `pkg/peers/` as a **concrete package**, not a seventh contract. The contract surface stays at six (Storage, Ontology, Updater, Reasoner, Proposer, Collector) — broadening it would force every profile to re-implement a peer table that the edge-minimal profile already provides for free. We promote to a contract when a second implementation arrives:
+
+- SQLite-backed registry for the edge-standard / cloud-full profile so trust history survives restarts;
+- gossip-based discovery (mDNS / dat-style) so peers find each other without a static `--peers` flag.
+
+The trade-off: callers couple to `peers.Registry` and `peers.Client` directly. That is acceptable inside `internal/minimal/` (the only consumer in v1). When external implementations appear, we lift the surface into `pkg/contracts/PeerCoordinatorContract` and the existing concrete types become its first implementation.
+
+### Trust mechanics
+
+`Descriptor.Trust` is a float in `[0, 1]`. Three forces move it:
+
+1. **Default at registration** = `0.5`. We neither blanket-trust nor pre-distrust an operator-supplied URL.
+2. **Manual override** via `POST /peers/{id}/trust` — operator console + test fixtures.
+3. **Automatic soft-penalty** on outbound HTTP failure inside `RecommendPeer` — `−0.05` per failed `/cost` query, clamped at 0. Persistently-down peers drain out of the eligible set over ~20 attempts without being hard-banned on a single transient blip.
+
+Outcome-driven trust updates (boost on successful offload accept, penalty on energy/latency overrun) are designed but not wired in v1. The hook exists — `Registry.UpdateTrust(id, delta)` — and the scenario test demonstrates a `+0.10` bump after a successful offload, but the daemon itself does not yet call it automatically on `/offload` responses. Promoting that to an automatic pipeline is the obvious P7 next step.
+
+### Why `RecommendPeer` uses trust-weighted savings
+
+Two candidate ranking functions:
+
+| Rank by | Effect |
+| --- | --- |
+| `savings` alone | Picks the lowest-cost peer regardless of reliability — vulnerable to a freshly-added unverified peer winning every recommendation. |
+| `savings × trust` | A high-cost-but-reliable peer beats a low-cost-but-suspect one when their trust ratio outweighs the cost ratio. Establishes a clean operational meaning for "trust": *how much do I discount this peer's stated savings*. |
+
+We chose the latter. The product collapses two dimensions into a single ordering, which is good enough for v1 routing decisions. A future profile that needs finer control (e.g. Pareto frontiers when latency and energy both matter) can build a richer ranker without changing the contract.
+
+### `/offload` is the decision interface, not a scheduler
+
+The `POST /offload` handler computes `CostOfAction` locally and answers *would I accept this task within these budgets?* It does not run anything. Two reasons:
+
+1. Execution requires a workload runtime (container manager, function-as-a-service, etc.) that the Semantic Map deliberately does not own. The map is the *brain*, not the *body*.
+2. Keeping the decision interface pure makes it cheap and idempotent. The source agent can poll multiple peers in parallel, pick a winner, and only then commit to actually moving work — entirely outside the Semantic Map's surface.
+
+The response carries `expected_latency` and `expected_energy` so the source agent can record an outcome, regardless of whether the actual offload executor ever exists.
+
+### Proof: the headline scenario
+
+`TestScenario_CoordinationOffload` is the load-bearing test for this layer. It wires three in-process agents (A idle, B loaded, C medium), gives each its own `httptest.NewServer` running the minimum surface (`/cost`, `/healthz`, `/offload`), cross-registers them, and walks B through a complete coordination cycle:
+
+1. Pre-flight: print self-cost for A, B, C — assert `A < C < B`.
+2. `B.RecommendPeer` → must return A (highest trust-weighted savings).
+3. `B → A POST /offload` via `peers.Client` → A accepts within the budget.
+4. B updates `Registry.UpdateTrust(A.ID, +0.10)` and prints the before/after table.
+
+The verbose output narrates each step. If the scenario passes with A chosen and trust incremented, the coordination claim is proven end-to-end. The HTTP routes, the CLI subcommand, and the operator-facing surface are plumbing around this core demo.
+
+### v1 security stance
+
+No auth on `/peers` or `/offload`. The deployment target is localhost / lab-network. Production hardening — mTLS, signed peer identities, bearer tokens, or a capability-based access control — is a deliberate P7 concern. Treating it as "out of scope for v1" is documented here so a future reviewer cannot mistake the omission for an oversight.

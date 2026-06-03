@@ -11,6 +11,11 @@
 //
 // Endpoint contract is documented in di-agent/semantic-map/go/cmd/agent/dto.go
 // and the Phase 1 routes.go.
+//
+// TODO(multi-agent v2): add a Peers panel that lists GET /peers, supports
+// add/remove/trust-override, and surfaces LastSeen so operators can see live
+// coordination state. Deferred from the v1 multi-agent change to keep the
+// scope tight — the mapctl CLI covers the same surface in the meantime.
 
 (function () {
   'use strict';

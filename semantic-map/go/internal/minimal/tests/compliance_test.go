@@ -53,7 +53,7 @@ func TestRuleEngineReasonerCompliance(t *testing.T) {
 		s := minimal.NewInMemoryStorage()
 		o := minimal.NewStaticDiSelectOntology()
 		seedReasonerState(t, s, o)
-		return minimal.NewRuleEngineReasoner(s, o, 0.5)
+		return minimal.NewRuleEngineReasoner(s, o, 0.5, nil, nil)
 	})
 }
 
@@ -72,7 +72,7 @@ func TestReasonerSkipsDeprecatedPropositions(t *testing.T) {
 	s := minimal.NewInMemoryStorage()
 	o := minimal.NewStaticDiSelectOntology()
 	seedReasonerState(t, s, o)
-	r := minimal.NewRuleEngineReasoner(s, o, 0.5)
+	r := minimal.NewRuleEngineReasoner(s, o, 0.5, nil, nil)
 
 	before, err := r.CostOfAction("pod-scheduling", "node_1")
 	if err != nil {

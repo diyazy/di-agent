@@ -1,11 +1,15 @@
 package minimal
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/DiyazY/di-agent/pkg/contracts"
+	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
@@ -18,18 +22,60 @@ import (
 // Blending formula:
 //
 //	effective = (1 - confidence) * prior + confidence * ema
+//
+// RecommendPeer goes one step further than CostOfAction: it queries each
+// registered peer's /cost endpoint via peers.Client, filters out anyone
+// below the configured trust floor, and ranks the survivors by
+// trust-weighted savings (myEnergy − peerEnergy) × peer.Trust.
 type RuleEngineReasoner struct {
-	storage      contracts.StorageContract
-	ontology     contracts.OntologyContract
+	storage       contracts.StorageContract
+	ontology      contracts.OntologyContract
 	minTrustScore float64
+
+	// peers is the live registry of remote agents this reasoner can offload
+	// to. nil is permitted (and equivalent to an empty registry): RecommendPeer
+	// returns ErrInsufficientTrust with an explanatory rationale when there is
+	// no one to query.
+	peers *peers.Registry
+
+	// peerc is the HTTP client used to talk to remote peers. nil is permitted
+	// alongside an empty registry — RecommendPeer never reaches it in that
+	// case. When set, transport errors are logged and treated as a soft trust
+	// penalty (peerPenalty below); they never abort the recommendation run.
+	peerc *peers.Client
 }
 
+// peerPenalty is the trust delta applied to a peer that fails a Cost query.
+// Small enough that a single transient blip barely registers; large enough
+// that a peer that is persistently down drains out of the eligible set after
+// ~20 attempts.
+const peerPenalty = -0.05
+
+// peerCostQueryTimeout caps a single RecommendPeer pass when the caller does
+// not supply a context. Generous (3s) — peers are LAN-local in v1, but the
+// daemon must not block on a hung peer forever.
+const peerCostQueryTimeout = 3 * time.Second
+
+// NewRuleEngineReasoner constructs the edge-minimal reasoner.
+//
+// peerRegistry and peerClient are optional. Pass nil for both when the
+// profile has no peers configured — RecommendPeer will simply return
+// ErrInsufficientTrust ("no peers registered") with a clear rationale.
+// Compliance tests rely on this graceful-no-peers behavior.
 func NewRuleEngineReasoner(
 	storage contracts.StorageContract,
 	ontology contracts.OntologyContract,
 	minTrustScore float64,
+	peerRegistry *peers.Registry,
+	peerClient *peers.Client,
 ) *RuleEngineReasoner {
-	return &RuleEngineReasoner{storage, ontology, minTrustScore}
+	return &RuleEngineReasoner{
+		storage:       storage,
+		ontology:      ontology,
+		minTrustScore: minTrustScore,
+		peers:         peerRegistry,
+		peerc:         peerClient,
+	}
 }
 
 // CostOfAction walks every non-deprecated edge in storage and accumulates the
@@ -109,58 +155,130 @@ func (r *RuleEngineReasoner) deprecatedPropositionSet() (map[string]bool, error)
 	return out, nil
 }
 
-func (r *RuleEngineReasoner) RecommendPeer(ctx *types.OffloadContext) (*types.PeerRecommendation, error) {
-	neighbors, err := r.storage.Neighbors(ctx.SourceNodeID)
+// RecommendPeer ranks every registered peer by trust-weighted savings and
+// returns the best candidate. The algorithm in steps:
+//
+//  1. List the peer registry. Empty → ErrInsufficientTrust with rationale
+//     "no peers registered".
+//  2. Compute the local CostOfAction once.
+//  3. For each peer with Trust ≥ minTrustScore, GET /cost on the peer URL.
+//     a. Success → MarkSeen on the registry; compute savings as
+//        (myEnergy − peerEnergy); compute trust-weighted savings as
+//        savings × peer.Trust.
+//     b. Failure → log via log.Printf and apply peerPenalty to the peer's
+//        trust score. Skip this peer; do not abort the run. The reasoner
+//        must remain useful when one peer is down.
+//  4. Pick the peer with the highest trust-weighted savings. If no peer
+//     beats local cost (savings ≤ 0 everywhere) → ErrInsufficientTrust.
+//  5. Build a PeerRecommendation citing the peer ID, the trust score we
+//     weighted by, and the peer's reported GraphPathUsed.
+//
+// Context: this contract method does not take a context.Context. We use a
+// per-call context with peerCostQueryTimeout to bound the total wall-clock.
+// When the ReasonerContract is widened to accept a ctx in a future revision,
+// it will flow through here directly.
+func (r *RuleEngineReasoner) RecommendPeer(octx *types.OffloadContext) (*types.PeerRecommendation, error) {
+	if r.peers == nil {
+		return nil, fmt.Errorf("%w: no peer registry configured", contracts.ErrInsufficientTrust)
+	}
+	list, err := r.peers.List()
+	if err != nil {
+		return nil, err
+	}
+	if len(list) == 0 {
+		return nil, fmt.Errorf("%w: no peers registered", contracts.ErrInsufficientTrust)
+	}
+
+	myCost, err := r.CostOfAction(octx.TaskType, octx.SourceNodeID)
 	if err != nil {
 		return nil, err
 	}
 
-	var bestPeer string
-	bestSavings := math.Inf(-1)
-	var bestPath []string
+	// Per-call context. Honors the caller's eventual context wiring once the
+	// contract is widened — for now context.TODO() with a bounded timeout.
+	ctx, cancel := context.WithTimeout(context.TODO(), peerCostQueryTimeout)
+	defer cancel()
 
-	myCost, err := r.CostOfAction(ctx.TaskType, ctx.SourceNodeID)
-	if err != nil {
-		return nil, err
+	type ranked struct {
+		peer     *peers.Descriptor
+		savings  float64
+		weighted float64
+		path     []string
 	}
 
-	for _, peer := range neighbors {
-		peerCost, err := r.CostOfAction(ctx.TaskType, peer)
-		if err != nil {
+	var best ranked
+	bestSet := false
+	var skippedBelowTrust, skippedHTTPError, skippedNoSavings int
+
+	for _, p := range list {
+		if p.Trust < r.minTrustScore {
+			skippedBelowTrust++
 			continue
 		}
+		if r.peerc == nil {
+			// Registry has entries but no client — treat as soft-fail. Log so
+			// operators notice the misconfiguration but keep the loop alive.
+			log.Printf("reasoner.RecommendPeer: no peer client configured; skipping peer %s", p.ID)
+			skippedHTTPError++
+			continue
+		}
+		peerCost, err := r.peerc.Cost(ctx, p.URL, octx.TaskType, octx.SourceNodeID)
+		if err != nil {
+			log.Printf("reasoner.RecommendPeer: peer %s (%s) cost query failed: %v", p.ID, p.URL, err)
+			// Soft trust penalty so persistently-down peers drain out of the
+			// eligible set without hard-banning them on first failure.
+			if perr := r.peers.UpdateTrust(p.ID, peerPenalty); perr != nil {
+				log.Printf("reasoner.RecommendPeer: penalty update failed: %v", perr)
+			}
+			skippedHTTPError++
+			continue
+		}
+		// Successful query — record contact.
+		if perr := r.peers.MarkSeen(p.ID, time.Now()); perr != nil {
+			log.Printf("reasoner.RecommendPeer: MarkSeen failed: %v", perr)
+		}
 		savings := myCost.EnergyCost - peerCost.EnergyCost
-		if savings > bestSavings {
-			bestSavings = savings
-			bestPeer = peer
-			bestPath = peerCost.GraphPathUsed
+		weighted := savings * p.Trust
+		if savings <= 0 {
+			skippedNoSavings++
+			continue
+		}
+		if !bestSet || weighted > best.weighted {
+			best = ranked{peer: p, savings: savings, weighted: weighted, path: peerCost.GraphPathUsed}
+			bestSet = true
 		}
 	}
 
-	if bestPeer == "" || bestSavings <= 0 {
-		return nil, contracts.ErrInsufficientTrust
+	if !bestSet {
+		return nil, fmt.Errorf("%w: %d peers below trust floor, %d http errors, %d had no savings (myEnergy=%.3f)",
+			contracts.ErrInsufficientTrust,
+			skippedBelowTrust, skippedHTTPError, skippedNoSavings, myCost.EnergyCost)
 	}
 
 	return &types.PeerRecommendation{
-		PeerID:          bestPeer,
-		ExpectedSavings: bestSavings,
-		Rationale:       fmt.Sprintf("peer=%s saves %.3f energy vs local execution; path=[%s]", bestPeer, bestSavings, strings.Join(bestPath, ", ")),
-		GraphPathUsed:   bestPath,
+		PeerID:          best.peer.ID,
+		ExpectedSavings: best.savings,
+		Rationale: fmt.Sprintf(
+			"peer=%s (url=%s trust=%.2f) saves %.3f energy vs local (%.3f); trust-weighted=%.3f; peer path=[%s]",
+			best.peer.ID, best.peer.URL, best.peer.Trust, best.savings, myCost.EnergyCost, best.weighted,
+			strings.Join(best.path, ", "),
+		),
+		GraphPathUsed: best.path,
 	}, nil
 }
 
-func (r *RuleEngineReasoner) SimulateOutcome(ctx *types.OffloadContext, targetNodeID string) (*types.OutcomeSimulation, error) {
-	cost, err := r.CostOfAction(ctx.TaskType, targetNodeID)
+func (r *RuleEngineReasoner) SimulateOutcome(octx *types.OffloadContext, targetNodeID string) (*types.OutcomeSimulation, error) {
+	cost, err := r.CostOfAction(octx.TaskType, targetNodeID)
 	if err != nil {
 		return nil, err
 	}
 
 	var riskFlags []string
-	if ctx.LatencyBudgetMs > 0 && cost.LatencyEstimate > ctx.LatencyBudgetMs {
-		riskFlags = append(riskFlags, fmt.Sprintf("latency %.1fms exceeds budget %.1fms", cost.LatencyEstimate, ctx.LatencyBudgetMs))
+	if octx.LatencyBudgetMs > 0 && cost.LatencyEstimate > octx.LatencyBudgetMs {
+		riskFlags = append(riskFlags, fmt.Sprintf("latency %.1fms exceeds budget %.1fms", cost.LatencyEstimate, octx.LatencyBudgetMs))
 	}
-	if ctx.EnergyBudgetJoules != nil && cost.EnergyCost > *ctx.EnergyBudgetJoules {
-		riskFlags = append(riskFlags, fmt.Sprintf("energy %.3fJ exceeds budget %.3fJ", cost.EnergyCost, *ctx.EnergyBudgetJoules))
+	if octx.EnergyBudgetJoules != nil && cost.EnergyCost > *octx.EnergyBudgetJoules {
+		riskFlags = append(riskFlags, fmt.Sprintf("energy %.3fJ exceeds budget %.3fJ", cost.EnergyCost, *octx.EnergyBudgetJoules))
 	}
 
 	return &types.OutcomeSimulation{

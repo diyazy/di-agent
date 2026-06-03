@@ -18,6 +18,7 @@ For design rationale, contract decisions, language strategy, and research connec
 - [3. Running the Edge Daemon](#3-running-the-edge-daemon)
 - [4. Compliance Tests](#4-compliance-tests)
 - [5. Prior Initialization](#5-prior-initialization)
+- [6. Coordination](#6-coordination)
 
 ---
 
@@ -110,9 +111,12 @@ semantic-map/
     │   ├── types/types.go      Go equivalents of all Python types
     │   ├── contracts/          Go interfaces (mirrors of Python ABCs)
     │   │   └── contracts.go    All 6 interfaces + sentinel errors
-    │   ├── semmap/map.go       SemanticMap Go facade
+    │   ├── peers/              Multi-agent coordination (concrete in v1, NOT a contract)
+    │   │   ├── peers.go        Registry + Descriptor + Client (HTTP /cost, /healthz, /offload)
+    │   │   └── peers_test.go   Registry + httptest client coverage
+    │   ├── semmap/map.go       SemanticMap Go facade (includes peer registry + client)
     │   └── profiles/           Profile factory
-    │       └── profiles.go     Build("edge-minimal", cfg) + ontology seeding
+    │       └── profiles.go     Build("edge-minimal", cfg) + ontology seeding + peer wire-up
     │
     ├── internal/               Implementation packages — not importable externally
     │   └── minimal/            edge-minimal profile implementations
@@ -126,7 +130,8 @@ semantic-map/
     │           ├── compliance_test.go   Runs all Go compliance suites
     │           └── scenarios_test.go    End-to-end narrated scenarios (ColdStart, Convergence,
     │                                    PerKDDecisionsDiffer, DeprecationShrinksGraph,
-    │                                    IdempotentReplay, AuditTrailRecordsEverything)
+    │                                    IdempotentReplay, AuditTrailRecordsEverything,
+    │                                    CoordinationOffload — 3-agent multi-agent demo)
     │
     ├── compliance/             Go compliance test suites — one per contract
     │   ├── collector.go        RunCollectorCompliance(t, factory)
@@ -154,7 +159,8 @@ semantic-map/
     │   ├── main.go             cmd.Execute()
     │   ├── cmd/                One file per subcommand (graph, edges, history, strength,
     │   │                       deprecate, construct, proposition, reset, candidates,
-    │   │                       recommend, simulate, watch, dot, health, version, completion)
+    │   │                       recommend, simulate, watch, dot, health, peers,
+    │   │                       version, completion)
     │   ├── client/             HTTP client + DTOs duplicated (NOT imported) from cmd/agent
     │   │   ├── client.go
     │   │   ├── types.go
@@ -531,3 +537,76 @@ agent -priors /etc/semantic-map/prior_weights.json -kd k0s
 If the supplied `-kd` is not in the file's `distributions` list, the daemon refuses to start.
 
 The current `prior_weights.json` was generated on 2026-05-12. Re-run if new empirical papers are incorporated or the KD set changes.
+
+---
+
+## 6. Coordination
+
+Multiple daemons can know about each other, query each other's `/cost`, and offload tasks based on trust-weighted savings. This is the multi-agent layer — the spine of the *decentralized* framework.
+
+### `--peers` flag
+
+Pass a comma-separated list of peer URLs at daemon start:
+
+```bash
+go run ./cmd/agent \
+  -profile edge-minimal -addr :8080 \
+  -peers http://node_1:8080,http://node_2:8080
+```
+
+Each URL is added to the in-memory peer registry with a default trust of `0.5`. The daemon logs `registered N peers: …` on startup. Additional peers can be added at runtime via `POST /peers`.
+
+### HTTP surface
+
+| Verb | Path | Body / Params | Response |
+| --- | --- | --- | --- |
+| `GET` | `/peers` | — | `[]PeerDTO{id,url,trust,n_observed,last_seen,note}` |
+| `POST` | `/peers` | `{url,note?}` | `200 PeerDTO` (idempotent on URL) |
+| `DELETE` | `/peers/{id}` | — | `204` |
+| `POST` | `/peers/{id}/trust` | `{value}` | `204` (manual operator override) |
+| `POST` | `/offload` | `{task_type,source_node_id,data_size_bytes,latency_budget_ms,energy_budget_joules?}` | `200 {accepted,reason,expected_latency,expected_energy}` |
+
+`/offload` is the peer side of the protocol: it runs `CostOfAction` on the local graph and accepts when the result fits the requested budgets. It does not actually schedule any work — that is a P7 (execution) concern. The expected latency/energy in the response let the source agent record an outcome and adjust trust.
+
+### `mapctl peers`
+
+```bash
+go run ./cmd/mapctl peers list                      # table view
+go run ./cmd/mapctl peers add http://node_1:8080 --note "rpi-1"
+go run ./cmd/mapctl peers list
+# ┌──────────────┬──────────────────────┬───────┬───┬──────────┬───────┐
+# │      ID      │         URL          │ Trust │ N │ LastSeen │  Note │
+# ├──────────────┼──────────────────────┼───────┼───┼──────────┼───────┤
+# │ a1b2c3d4e5f6 │ http://node_1:8080   │ 0.500 │ 0 │ never    │ rpi-1 │
+# └──────────────┴──────────────────────┴───────┴───┴──────────┴───────┘
+
+go run ./cmd/mapctl peers trust a1b2c3d4e5f6 0.9    # manual override
+go run ./cmd/mapctl peers remove a1b2c3d4e5f6
+```
+
+### How `RecommendPeer` uses peers
+
+For every call, the reasoner:
+
+1. Lists peers from the registry. Empty → `ErrInsufficientTrust` ("no peers registered").
+2. Skips any peer below `--min-trust` (default `0.5`).
+3. For each survivor: `GET /cost` on the peer URL; on success `MarkSeen` + record `savings = myEnergy − peerEnergy`; on failure log + nudge trust down by `0.05` (clamped at 0).
+4. Picks the peer maximizing `savings × peer.Trust` — trust-weighted savings.
+5. If no peer beats local cost → `ErrInsufficientTrust` with rationale.
+
+Trust dynamics in v1 are simple: default `0.5` on registration; manual override via `POST /peers/{id}/trust`; automatic `-0.05` penalty on HTTP failure. Richer schemes (per-outcome updates after `/offload`, decay over time, signed identities) are deferred.
+
+### Demo scenario
+
+`TestScenario_CoordinationOffload` wires three in-process agents (A idle, B loaded, C medium), cross-registers them, has B call `RecommendPeer`, and asserts A wins. Run with:
+
+```bash
+go test -v -run TestScenario_CoordinationOffload ./internal/minimal/tests/...
+```
+
+The verbose output narrates pre-flight self-costs, the peer query, the rationale, the offload acceptance, and the trust update.
+
+### v1 scope and security
+
+* No auth on `/peers` or `/offload` yet. Intended for localhost / lab-network deployment. Production hardening (mTLS, bearer tokens, signed peer identities) is a P7 concern.
+* `peers.Registry` and `peers.Client` are concrete types in `pkg/peers/`, **not** a seventh contract. The contract surface stays at six (Storage, Ontology, Updater, Reasoner, Proposer, Collector). We promote when a second implementation arrives (e.g. SQLite-backed registry, gossip discovery).

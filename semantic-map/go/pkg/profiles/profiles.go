@@ -10,9 +10,15 @@ import (
 
 	"github.com/DiyazY/di-agent/internal/minimal"
 	"github.com/DiyazY/di-agent/pkg/contracts"
+	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/semmap"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
+
+// defaultPeerTimeout caps a single peer HTTP call in v1. LAN-local peers
+// resolve in single-digit milliseconds; 2s gives an order of magnitude of
+// headroom for a stalled peer without making the reasoner block forever.
+const defaultPeerTimeout = 2 * time.Second
 
 // Config holds profile-specific tuning parameters.
 type Config struct {
@@ -55,6 +61,18 @@ type Config struct {
 	// CollectInterval is how often the collection scheduler ticks. Zero
 	// disables the loop entirely. Callers (main.go) default to 10s.
 	CollectInterval time.Duration
+
+	// PeerURLs is the static list of known remote agent URLs to register at
+	// startup (e.g. ["http://node_1:8080", "http://node_2:8080"]). Each URL
+	// is added to the in-memory peer registry with default trust 0.5; the
+	// reasoner discovers them via SemanticMap.Peers(). Empty or nil → the
+	// daemon starts with no peers and RecommendPeer returns
+	// ErrInsufficientTrust until /peers POSTs populate the registry.
+	PeerURLs []string
+
+	// PeerTimeout overrides the per-call HTTP timeout for outbound peer
+	// queries. Zero → defaultPeerTimeout (2s).
+	PeerTimeout time.Duration
 }
 
 func DefaultConfig() Config {
@@ -153,10 +171,30 @@ func validateKD(pw *priorWeightsFile, kd string) error {
 }
 
 func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, contracts.CollectorContract) {
-	storage  := minimal.NewInMemoryStorage()
+	storage := minimal.NewInMemoryStorage()
 	ontology := minimal.NewStaticDiSelectOntology()
-	updater  := minimal.NewEMAUpdater(storage, cfg.EMAAlpha, cfg.ConvergenceThreshold)
-	reasoner := minimal.NewRuleEngineReasoner(storage, ontology, cfg.MinTrustScore)
+	updater := minimal.NewEMAUpdater(storage, cfg.EMAAlpha, cfg.ConvergenceThreshold)
+
+	// Peer registry + outbound HTTP client. Always constructed (cheap, no
+	// network I/O) so the reasoner has a place to look up peers even when
+	// the daemon was started without -peers; the /peers POST endpoint can
+	// then populate it at runtime.
+	peerRegistry := peers.NewRegistry()
+	timeout := cfg.PeerTimeout
+	if timeout <= 0 {
+		timeout = defaultPeerTimeout
+	}
+	peerClient := peers.NewClient(timeout)
+	for _, url := range cfg.PeerURLs {
+		if url == "" {
+			continue
+		}
+		// Best-effort: an invalid URL surfaces as ErrEmptyURL (already
+		// filtered above) — any other error is impossible from Add today.
+		_, _ = peerRegistry.Add(url, "")
+	}
+
+	reasoner := minimal.NewRuleEngineReasoner(storage, ontology, cfg.MinTrustScore, peerRegistry, peerClient)
 	proposer := minimal.NewDisabledProposer()
 
 	// Apply calibrated proposition strengths from the pipeline before seeding
@@ -167,7 +205,7 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 
 	seedFromOntology(storage, ontology, pw, cfg.KD)
 
-	sm := semmap.New(storage, ontology, updater, reasoner, proposer)
+	sm := semmap.NewWithPeers(storage, ontology, updater, reasoner, proposer, peerRegistry, peerClient)
 
 	// Construct the cgroup collector only if the daemon was configured to
 	// drive one. Empty CgroupRoot or NodeID → return nil and let the caller
