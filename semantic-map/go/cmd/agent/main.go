@@ -13,7 +13,8 @@
 //
 //	agent -profile edge-minimal -addr :8080 -alpha 0.2 -convergence 500 \
 //	      -priors /path/to/prior_weights.json -kd k0s \
-//	      -collect-interval 10s -cgroup-root /sys/fs/cgroup
+//	      -collect-interval 10s -cgroup-root /sys/fs/cgroup \
+//	      -peers http://node_1:8080,http://node_2:8080
 //
 // The -kd flag selects per-distribution edge weights from prior_weights.json
 // when set. Omit it (or pass an empty string) to use the global Di-Select
@@ -32,6 +33,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -63,6 +65,11 @@ func main() {
 		"filesystem root the cgroup collector reads from; empty string disables the loop")
 	nodeID          := flag.String("node-id", "",
 		"identifier this agent uses in MetricSamples; empty falls back to os.Hostname()")
+	peersFlag       := flag.String("peers", "",
+		"comma-separated peer agent URLs to register at startup "+
+			"(e.g. http://node_1:8080,http://node_2:8080). RecommendPeer ranks "+
+			"these by trust-weighted savings. Additional peers can be added at "+
+			"runtime via POST /peers.")
 	flag.Parse()
 
 	if *nodeID == "" {
@@ -70,6 +77,8 @@ func main() {
 			*nodeID = h
 		}
 	}
+
+	peerURLs := parsePeerURLs(*peersFlag)
 
 	cfg := profiles.Config{
 		EMAAlpha:             *alpha,
@@ -80,11 +89,15 @@ func main() {
 		NodeID:               *nodeID,
 		CgroupRoot:           *cgroupRoot,
 		CollectInterval:      *collectInterval,
+		PeerURLs:             peerURLs,
 	}
 
 	sm, collector, err := profiles.Build(*profileName, cfg)
 	if err != nil {
 		log.Fatalf("failed to build profile %q: %v", *profileName, err)
+	}
+	if len(peerURLs) > 0 {
+		log.Printf("registered %d peers: %s", len(peerURLs), strings.Join(peerURLs, ", "))
 	}
 
 	mux := http.NewServeMux()
@@ -113,6 +126,29 @@ func main() {
 	<-quit
 	log.Println("shutting down")
 	cancel()
+}
+
+// parsePeerURLs splits the --peers comma-separated value into a clean slice.
+// Empty entries (e.g. trailing commas, all-whitespace tokens) are dropped so
+// the registry never sees a "" URL. Returns nil when the input is empty so
+// callers can branch on len() instead of inspecting both flag and slice.
+func parsePeerURLs(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // startCollectionLoop launches the autonomous tick goroutine. It is a no-op
