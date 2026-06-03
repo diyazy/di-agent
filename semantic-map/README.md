@@ -165,7 +165,7 @@ semantic-map/
     │
     └── cmd/replay/             Parquet replay binary — drives the 225 Netdata
         │                       parquets (P1–P5 dataset) into POST /ingest-sample
-        ├── main.go             run / all / probe / list subcommands (flag dispatch)
+        ├── main.go             run / all / probe / list / compare subcommands
         ├── parquet/            Streaming long-format reader over parquet-go v0.25.1
         │   ├── reader.go       Open + Next + Close; 4096-row batched buffer
         │   └── reader_test.go  Synthesized fixture parquets in t.TempDir()
@@ -176,6 +176,16 @@ semantic-map/
         │   ├── runner.go       Run(ctx, sender, cfg) + deterministic EventID()
         │   └── runner_test.go  httptest.Server-backed Sender; covers EventID
         │                       determinism across two replays (idempotency proof)
+        ├── compare/            In-process per-KD replay + divergence (meta-analysis)
+        │   ├── runner.go       Build a SemanticMap per KD, stream parquet rows,
+        │   │                   snapshot edges. Skips HTTP — driven on pkg/semmap
+        │   │                   directly. See top-of-file comment for rationale.
+        │   ├── divergence.go   Effective=(1-c)·prior+c·ema; Range, sample StdDev,
+        │   │                   sorted by Range desc (most discriminative first)
+        │   ├── output.go       Table / JSON / CSV formatters
+        │   ├── runner_test.go  Two synthesized "KDs" diverge as expected; 5-run
+        │   │                   averaging differs from single-run snapshot
+        │   └── divergence_test.go  Range/StdDev arithmetic, sort order, formula
         └── client/             POST /ingest-sample wrapper + DTOs duplicated
             └── client.go        from cmd/agent (same wire-boundary discipline as mapctl)
 ```
@@ -377,6 +387,44 @@ Rows outside the table (Netdata's own `netdata.workers.*` self-monitoring,
 disk/inode contexts, per-core `cpu.cpu` channels, …) are silently dropped
 by the playback layer. Extending the table later is a contained change in
 `cmd/replay/mapping/mapping.go`; the runner and CLI need no edits.
+
+#### Replay compare (cross-KD divergence)
+
+`replay compare` is the meta-analysis side of replay: instead of streaming
+one KD's rows into a live daemon, it builds **N independent SemanticMaps
+in one process** — one per KD, each seeded with its calibrated priors from
+`prior_weights.json` — feeds each only its own KD's parquet rows, then
+snapshots every map's final graph state and prints a per-edge × per-KD
+divergence table. The output is the dissertation's "which edges
+discriminate KDs?" figure as a reproducible artifact.
+
+```bash
+./dev.sh replay compare --test idle --run 1                   # 5-KD divergence table
+./dev.sh replay compare --test idle --runs-all --json         # all 5 runs averaged, JSON
+./dev.sh replay compare --test cp_heavy_12client --csv > c.csv  # long-format CSV
+```
+
+```text
+=== compare: test=idle, run=1, 5 KDs ===
+
+  PropID      Edge  Prior      k0s      k3s      k8s  kubeEdge  openYurt    Range
+      P1  SC→RC(+)  0.214    0.045    0.032    0.046    0.068    0.067    0.036
+      P2  RC→PS(-)  0.319    0.047    0.049    0.045    0.050    0.058    0.013
+      ...
+```
+
+The `Effective` column for KD *i* is `(1 − confidence) · prior + confidence
+· ema` — the value the Reasoner would actually consume. `Range = max −
+min` flags the most discriminative edges; the bottom matter prints the
+diverged-edge count, per-KD convergence summary, top-3 most divergent
+edges, and a bridge-boundary count. JSON output omits wall-clock fields so
+`diff /tmp/c1.json /tmp/c2.json` is empty across two consecutive runs
+(deterministic compute is the reproducibility contract).
+
+Compare is the deliberate exception to "cmd/replay only speaks HTTP" — it
+imports `pkg/profiles` and `pkg/semmap` directly because cross-KD
+comparison cannot share a daemon without cross-contamination. The
+rationale is documented at the top of `cmd/replay/compare/runner.go`.
 
 ---
 
