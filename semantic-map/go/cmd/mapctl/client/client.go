@@ -270,3 +270,48 @@ func (c *Client) Simulate(ctx context.Context, octx OffloadContext, target strin
 	}
 	return &out, nil
 }
+
+// ── Peer coordination endpoints ───────────────────────────────────────────────
+
+// ListPeers returns every registered peer (GET /peers).
+func (c *Client) ListPeers(ctx context.Context) ([]PeerDTO, error) {
+	var out []PeerDTO
+	if err := c.getJSON(ctx, "/peers", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// AddPeer registers a new peer at url with an optional human-readable note
+// (POST /peers). Returns the resulting PeerDTO including the derived ID.
+func (c *Client) AddPeer(ctx context.Context, url, note string) (*PeerDTO, error) {
+	var out PeerDTO
+	if err := c.postJSON(ctx, "/peers", AddPeerRequest{URL: url, Note: note}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// RemovePeer unregisters the peer with the given ID (DELETE /peers/{id}).
+func (c *Client) RemovePeer(ctx context.Context, id string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete,
+		c.BaseURL+"/peers/"+url.PathEscape(id), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return errorFromResponse(resp)
+	}
+	return nil
+}
+
+// SetPeerTrust manually overrides a peer's trust score (POST /peers/{id}/trust).
+func (c *Client) SetPeerTrust(ctx context.Context, id string, value float64) error {
+	return c.postJSON(ctx, "/peers/"+url.PathEscape(id)+"/trust",
+		SetTrustRequest{Value: value}, nil)
+}
