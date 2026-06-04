@@ -386,8 +386,9 @@ case "my-profile":
     updater   := myprofile.NewMyUpdater(storage, ...)
     reasoner  := myprofile.NewMyReasoner(storage, ontology, ...)
     proposer  := myprofile.NewMyProposer(...)
+    tuner     := myprofile.NewMyTuner(...)      // or minimal.NewDisabledTuner() to opt out
     seedFromOntology(storage, ontology)
-    return semmap.New(storage, ontology, updater, reasoner, proposer), collector, nil
+    return semmap.New(storage, ontology, updater, reasoner, proposer, tuner), collector, nil
 ```
 
 4. Add the profile to `profiles.py` (Python registry) if a Python equivalent is needed.

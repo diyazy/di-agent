@@ -129,12 +129,15 @@ semantic-map/
     │       ├── updater.go      EMAUpdater             (idempotency, reset; multigraph-aware)
     │       ├── reasoner.go     RuleEngineReasoner     (deterministic, blended, skips deprecated)
     │       ├── proposer.go     DisabledProposer       (no-op)
+    │       ├── proposer_mi.go  MICorrelationProposer  (Pearson r + Fisher z p-values; default via -proposer=true)
+    │       ├── tuner.go        RuleBasedTuner + DisabledTuner (7 intent patterns; default via -tuner=true)
     │       └── tests/
     │           ├── compliance_test.go   Runs all Go compliance suites
     │           └── scenarios_test.go    End-to-end narrated scenarios (ColdStart, Convergence,
     │                                    PerKDDecisionsDiffer, DeprecationShrinksGraph,
     │                                    IdempotentReplay, AuditTrailRecordsEverything,
-    │                                    CoordinationOffload — 3-agent multi-agent demo)
+    │                                    CoordinationOffload — 3-agent multi-agent demo,
+    │                                    ProposerNaturalDiscovery, OperatorTuneAndAuditTrail)
     │
     ├── compliance/             Go compliance test suites — one per contract
     │   ├── collector.go        RunCollectorCompliance(t, factory)
