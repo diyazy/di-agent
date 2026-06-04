@@ -23,6 +23,7 @@ Design rationale and decision record. Update this file when a contract, profile,
 - [8. Connection to Research](#8-connection-to-research)
 - [9. Control Surface](#9-control-surface)
 - [10. Coordination](#10-coordination)
+- [11. Operator Tuning Interface](#11-operator-tuning-interface)
 
 ---
 
@@ -605,3 +606,53 @@ The verbose output narrates each step. If the scenario passes with A chosen and 
 ### v1 security stance
 
 No auth on `/peers` or `/offload`. The deployment target is localhost / lab-network. Production hardening — mTLS, signed peer identities, bearer tokens, or a capability-based access control — is a deliberate P7 concern. Treating it as "out of scope for v1" is documented here so a future reviewer cannot mistake the omission for an oversight.
+
+---
+
+## 11. Operator Tuning Interface
+
+Operators express priorities in natural language. The Tuner maps intent to structured proposition adjustments; the SemanticMap validates and applies them deterministically. The Tuner is **never in the execution path** — offload decisions remain graph-driven and fully traceable regardless of how weights were tuned.
+
+### Pipeline
+
+```
+POST /agent/tune {"intent": "prioritize security", "operator": "alice"}
+          ↓
+TunerContract.ParseIntent(text) → []TuneIntent{PropositionID, Delta}
+          ↓
+SemanticMap.Tune: resolve current strengths → compute newStrength = clamp(old+delta, floor, ceil)
+          ↓
+TunerContract.Validate(adjustments) — hard bounds check
+          ↓
+OntologyContract.SetPropositionStrength × N   ← each emits "set-strength" event
+OntologyContract.RecordTune(text, operator)   ← single "operator-tune" event
+          ↓
+Return []TuneAdjustment: PropositionID, OldStrength, NewStrength, Rationale
+```
+
+### Hard bounds
+
+| Proposition class | Floor | Ceiling |
+|---|---|---|
+| SC-related (P1, P4, P11, P14) | 0.30 | 0.95 |
+| All others | 0.10 | 0.95 |
+
+Security propositions have a higher floor: operators cannot fully deprioritize security compliance even under resource pressure.
+
+### V1 rule table (RuleBasedTuner)
+
+| Keyword group | Example phrase | Propositions adjusted |
+|---|---|---|
+| security, secure, compliance | "prioritize security" | P1 +0.12, P11 +0.12 |
+| performance, throughput, latency | "focus on throughput" | P3 +0.12, P2 −0.10 |
+| energy, power, efficient | "prioritize energy efficiency" | P10 +0.12, P8 +0.08 |
+| reliability, resilience, ha | "prioritize reliability" | P5 +0.12, P15 +0.12 |
+| maintainability, simple, admin | "simplify operations" | P7 +0.12, P8 +0.10 |
+| connectivity, offline | "offline capability" | P5 +0.12, P13 +0.08 |
+| community, ecosystem | "leverage community" | P7 +0.12, P11 +0.08 |
+
+Direction modifiers: "deprioritize / reduce / lower / minimize" negate all deltas. Default (no direction word) = increase.
+
+### SLM back-end (cloud-full)
+
+The `cloud-full` profile will substitute a Phi-3 Mini / Gemma 2B inference call behind the same `TunerContract` interface. The contract, validation, audit trail, and hard bounds are profile-agnostic — swapping the back-end changes no other code.

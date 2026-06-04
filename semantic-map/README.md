@@ -50,6 +50,7 @@ go run ./cmd/mapctl edges --from RC --to PS
 go run ./cmd/mapctl deprecate P1 "smoke test"   # soft-delete a proposition
 go run ./cmd/mapctl history --since 1h    # audit log entries
 go run ./cmd/mapctl reset RC PS           # EMA → prior
+go run ./cmd/mapctl tune "prioritize security"   # natural-language weight adjustment
 ```
 
 ```bash
@@ -319,6 +320,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/ontology/construct`               | `{construct_id, name, description}`                      | Phase 1  |
 | POST | `/ontology/proposition`             | `{proposition_id, from, to, direction:"+"|"-", prior_strength}` | Phase 1 |
 | POST | `/agent/reset`                      | `{from, to}`                                             | Phase 1  |
+| POST | `/agent/tune`                       | `TuneRequest{intent, operator?}`                         | Step 7   | Map natural-language intent to proposition strength adjustments |
 | POST | `/candidates/{id}/confirm`          | path only                                                | Phase 1  |
 | POST | `/candidates/{id}/reject`           | path only                                                | Phase 1  |
 | POST | `/candidates/{id}/defer`            | path only                                                | Phase 1  |
@@ -457,6 +459,7 @@ documented at the top of `cmd/replay/compare/runner.go`.
 | `-node-id`          | `""`             | Identifier this agent puts on emitted `MetricSample`s and uses in event IDs. Empty falls back to `os.Hostname()`. |
 | `-netdata-url`      | `""`             | Base URL of a Netdata daemon to poll for live node metrics (e.g. `http://localhost:19999`). Empty disables Netdata collection. When set together with `-cgroup-root`, both run as a `MultiCollector`. |
 | `-proposer`         | `true`           | Enable `MICorrelationProposer` (Fisher z p-values, construct-level pairing). Set `false` on nodes where ring-buffer overhead is undesirable; the daemon falls back to `DisabledProposer` (no-op). |
+| `-tuner`            | `true`           | Enable `RuleBasedTuner`. Set `false` to disable operator tuning entirely; `POST /agent/tune` still accepts requests but returns empty adjustments. |
 
 ---
 
