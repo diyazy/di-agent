@@ -1,6 +1,9 @@
 package minimal_test
 
 import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -37,6 +40,36 @@ func TestCgroupCollectorCompliance(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 		return c
 	})
+}
+
+func TestNetdataCollectorCompliance(t *testing.T) {
+	// Fake Netdata server responding to all three charts.
+	srv := httptest.NewServer(netdataFakeHandler(t))
+	defer srv.Close()
+
+	compliance.RunCollectorCompliance(t, func(t *testing.T) contracts.CollectorContract {
+		return minimal.NewNetdataCollector("test-node", srv.URL, nil)
+	})
+}
+
+// netdataFakeHandler returns an http.Handler that responds with canned Netdata JSON.
+func netdataFakeHandler(t *testing.T) http.Handler {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/data", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("chart") {
+		case "system.cpu":
+			fmt.Fprint(w, `{"result":{"labels":["time","user","system","idle"],"data":[[1703123456,2.5,0.5,96.9]]}}`)
+		case "system.ram":
+			fmt.Fprint(w, `{"result":{"labels":["time","free","used","cached","buffers"],"data":[[1703123456,4096.0,2048.0,1024.0,512.0]]}}`)
+		case "system.net":
+			fmt.Fprint(w, `{"result":{"labels":["time","InOctets","OutOctets"],"data":[[1703123456,8.0,-6.0]]}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	return mux
 }
 
 func TestStaticDiSelectOntologyCompliance(t *testing.T) {

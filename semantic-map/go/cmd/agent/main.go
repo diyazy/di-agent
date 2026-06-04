@@ -65,6 +65,8 @@ func main() {
 		"filesystem root the cgroup collector reads from; empty string disables the loop")
 	nodeID          := flag.String("node-id", "",
 		"identifier this agent uses in MetricSamples; empty falls back to os.Hostname()")
+	netdataURL      := flag.String("netdata-url", "",
+		"base URL of Netdata daemon to poll (e.g. http://localhost:19999). Empty disables Netdata collection.")
 	peersFlag       := flag.String("peers", "",
 		"comma-separated peer agent URLs to register at startup "+
 			"(e.g. http://node_1:8080,http://node_2:8080). RecommendPeer ranks "+
@@ -90,6 +92,7 @@ func main() {
 		KD:                   *kd,
 		NodeID:               *nodeID,
 		CgroupRoot:           *cgroupRoot,
+		NetdataURL:           *netdataURL,
 		CollectInterval:      *collectInterval,
 		PeerURLs:             peerURLs,
 		UseProposer:          useProposer,

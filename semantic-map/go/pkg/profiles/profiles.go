@@ -58,6 +58,11 @@ type Config struct {
 	// CollectorContract handle).
 	CgroupRoot string
 
+	// NetdataURL is the base URL of a Netdata daemon to poll for live metrics
+	// (e.g. "http://localhost:19999"). Empty string disables the Netdata collector.
+	// When set together with CgroupRoot, both collectors run as a MultiCollector.
+	NetdataURL string
+
 	// CollectInterval is how often the collection scheduler ticks. Zero
 	// disables the loop entirely. Callers (main.go) default to 10s.
 	CollectInterval time.Duration
@@ -236,14 +241,23 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 
 	sm := semmap.NewWithPeers(storage, ontology, updater, reasoner, proposer, peerRegistry, peerClient)
 
-	// Construct the cgroup collector only if the daemon was configured to
-	// drive one. Empty CgroupRoot or NodeID → return nil and let the caller
-	// skip the collection loop. We do not fall back to defaults here because
-	// the daemon (main.go) is the authority on those defaults; profiles
-	// should not silently invent paths.
+	// Build collector(s): Netdata, Cgroup, or both via MultiCollector.
+	// Empty CgroupRoot/NodeID or empty NetdataURL disables the respective
+	// collector. Both absent → nil collector, collection loop disabled.
 	var collector contracts.CollectorContract
-	if cfg.CgroupRoot != "" && cfg.NodeID != "" {
+	hasCgroup := cfg.CgroupRoot != "" && cfg.NodeID != ""
+	hasNetdata := cfg.NetdataURL != ""
+
+	switch {
+	case hasCgroup && hasNetdata:
+		cgroupC := minimal.NewCgroupCollector(cfg.NodeID, cfg.CgroupRoot)
+		netdataC := minimal.NewNetdataCollector(cfg.NodeID, cfg.NetdataURL, nil)
+		collector = minimal.NewMultiCollector(cgroupC, netdataC)
+	case hasNetdata:
+		collector = minimal.NewNetdataCollector(cfg.NodeID, cfg.NetdataURL, nil)
+	case hasCgroup:
 		collector = minimal.NewCgroupCollector(cfg.NodeID, cfg.CgroupRoot)
+	// else: collector stays nil — collection loop disabled
 	}
 
 	return sm, collector
