@@ -128,8 +128,14 @@ var (
 
 // ProposerContract detects statistical patterns suggesting new backbone edges.
 //
+// The natural entry point from the Bridge and IngestSample is ObserveConstruct,
+// which feeds a single construct value and internally pairs it against every
+// other construct the proposer has seen. Observe remains public for callers
+// (tests, control-surface HTTP handlers) that already know the pair to feed.
+//
 // Guarantees:
-//   - Read-only observation: Observe never modifies Storage or Ontology.
+//   - Read-only observation: Observe and ObserveConstruct never modify Storage
+//     or Ontology.
 //   - Confirm delegates: Confirm calls OntologyContract.AddValidatedProposition;
 //     it never writes to Storage directly.
 //   - Permanent suppression: after Reject, the same (fromID, toID, direction)
@@ -137,6 +143,10 @@ var (
 //   - Candidates: GetCandidates returns only Pending entries.
 type ProposerContract interface {
 	Observe(fromID, toID string, valueA, valueB float64) error
+	// ObserveConstruct records the latest value observed for a single construct.
+	// The proposer internally pairs construct values across its latestValues map
+	// so callers (Bridge, IngestSample) need not know which pairs to supply.
+	ObserveConstruct(constructID string, value float64) error
 	GetCandidates() ([]*types.CandidateEdge, error)
 	Confirm(candidateID string) error
 	Reject(candidateID string) error

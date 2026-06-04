@@ -434,3 +434,38 @@ main {
 .toast.toast-success {
   background: #2eb872;
 }
+
+/* ── Candidates chip ───────────────────────────────────────────────────── */
+
+.chip {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  background: #e8a000;
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  margin-left: 8px;
+}
+.chip.hidden { display: none; }
+
+/* ── Candidate review cards ────────────────────────────────────────────── */
+
+.candidate-card {
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: #fafafa;
+}
+.candidate-header { display: flex; justify-content: space-between; align-items: center; }
+.candidate-meta { font-size: 0.8rem; color: #666; margin: 4px 0; }
+.candidate-actions { display: flex; gap: 6px; margin-top: 6px; }
+.candidate-actions button { padding: 3px 10px; border: none; border-radius: 3px; cursor: pointer; font-size: 0.8rem; }
+.btn-confirm { background: #2a9d2a; color: #fff; }
+.btn-reject  { background: #c0392b; color: #fff; }
+.btn-defer   { background: #7f8c8d; color: #fff; }
+.direction.pos { color: #2a9d2a; font-weight: bold; }
+.direction.neg { color: #c0392b; font-weight: bold; }
+.empty { color: #999; font-style: italic; font-size: 0.85rem; }

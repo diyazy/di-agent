@@ -12,7 +12,7 @@ import (
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
-// MICorrelationProposer is a demo-grade ProposerContract implementation.
+// MICorrelationProposer is a production-grade ProposerContract implementation.
 //
 // It maintains a fixed-size ring buffer of (valueA, valueB) observations per
 // construct pair. Once `minPairs` samples accumulate, it computes the Pearson
@@ -26,16 +26,17 @@ import (
 // edge-standard or cloud-full profile may swap in true mutual-information
 // estimation without changing the interface.
 //
-// p-value computation is intentionally stubbed (PValue=0) — this is a demo
-// proposer, not a statistical test harness. Operators should treat the score
-// alone as the relevance signal.
+// p-values are computed via the Fisher z-transform (two-tailed). The natural
+// entry point from IngestSample is ObserveConstruct, which pairs a new
+// construct value against every other construct seen so far.
 type MICorrelationProposer struct {
 	ontology contracts.OntologyContract
 
-	mu         sync.Mutex
-	buffers    map[string]*pairBuffer         // key: fromID + "→" + toID
-	candidates map[string]*types.CandidateEdge // key: CandidateID — holds the LATEST status
-	order      []string                        // insertion order of CandidateIDs, for stable history iteration
+	mu           sync.Mutex
+	buffers      map[string]*pairBuffer         // key: fromID + "→" + toID
+	candidates   map[string]*types.CandidateEdge // key: CandidateID — holds the LATEST status
+	order        []string                        // insertion order of CandidateIDs, for stable history iteration
+	latestValues map[string]float64              // construct → most recent observed value
 
 	threshold float64 // |Pearson r| trigger to emit a candidate
 	minPairs  int     // minimum buffered samples before evaluating
@@ -66,12 +67,13 @@ func NewMICorrelationProposer(
 		bufSize = minPairs
 	}
 	return &MICorrelationProposer{
-		ontology:   ontology,
-		buffers:    make(map[string]*pairBuffer),
-		candidates: make(map[string]*types.CandidateEdge),
-		threshold:  threshold,
-		minPairs:   minPairs,
-		bufSize:    bufSize,
+		ontology:     ontology,
+		buffers:      make(map[string]*pairBuffer),
+		candidates:   make(map[string]*types.CandidateEdge),
+		latestValues: make(map[string]float64),
+		threshold:    threshold,
+		minPairs:     minPairs,
+		bufSize:      bufSize,
 	}
 }
 
@@ -89,7 +91,11 @@ func NewMICorrelationProposer(
 func (p *MICorrelationProposer) Observe(fromID, toID string, valueA, valueB float64) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.observeLocked(fromID, toID, valueA, valueB)
+}
 
+// observeLocked is the lock-free inner body of Observe. Callers must hold p.mu.
+func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, valueB float64) error {
 	key := fromID + "→" + toID
 	buf, ok := p.buffers[key]
 	if !ok {
@@ -143,6 +149,7 @@ func (p *MICorrelationProposer) Observe(fromID, toID string, valueA, valueB floa
 		// emitted positive candidate that now sees negative correlation
 		// keeps its original direction; operators see the up-to-date score).
 		existing.MIScore = math.Abs(r)
+		existing.PValue = fisherPValue(r, buf.count)
 		existing.NObservations = buf.count
 		return nil
 	}
@@ -153,13 +160,45 @@ func (p *MICorrelationProposer) Observe(fromID, toID string, valueA, valueB floa
 		ToID:          toID,
 		Direction:     direction,
 		MIScore:       math.Abs(r),
-		PValue:        0, // stub — see package doc
+		PValue:        fisherPValue(r, buf.count),
 		NObservations: buf.count,
 		Status:        types.Pending,
 	}
 	p.candidates[candID] = cand
 	p.order = append(p.order, candID)
 	return nil
+}
+
+// ObserveConstruct records the latest value observed for a single construct.
+// It internally pairs the new value against every other construct for which a
+// value has been seen, feeding consistent (lexicographic) pair ordering into
+// observeLocked so buffer keys are deterministic regardless of call order.
+func (p *MICorrelationProposer) ObserveConstruct(constructID string, value float64) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Update latest value before pairing so the current observation is
+	// available when other constructs call ObserveConstruct later.
+	p.latestValues[constructID] = value
+
+	// Pair with every other construct for which we have a value.
+	var firstErr error
+	for otherID, otherVal := range p.latestValues {
+		if otherID == constructID {
+			continue
+		}
+		// Feed with consistent ordering: lexicographically smaller ID is "from".
+		fromID, toID := constructID, otherID
+		valA, valB := value, otherVal
+		if otherID < constructID {
+			fromID, toID = otherID, constructID
+			valA, valB = otherVal, value
+		}
+		if err := p.observeLocked(fromID, toID, valA, valB); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // GetCandidates returns Pending candidates sorted by CandidateID for stable
@@ -309,6 +348,18 @@ func pearson(xs, ys []float64) float64 {
 		return math.NaN()
 	}
 	return num / math.Sqrt(denX*denY)
+}
+
+// fisherPValue returns the two-tailed p-value for Pearson r using the
+// Fisher z-transform: z = atanh(r) * sqrt(n-3), then N(0,1) tail probability.
+// Returns 1.0 when n < 4 (not enough data for a valid z-transform).
+func fisherPValue(r float64, n int) float64 {
+	if n < 4 {
+		return 1.0
+	}
+	z := math.Atanh(r) * math.Sqrt(float64(n-3))
+	// Two-tailed: P = 2 * (1 - Φ(|z|)) = erfc(|z|/sqrt(2))
+	return math.Erfc(math.Abs(z) / math.Sqrt2)
 }
 
 func synthesizePropSuffix(candidateID string) string {

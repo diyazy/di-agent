@@ -73,6 +73,18 @@ type Config struct {
 	// PeerTimeout overrides the per-call HTTP timeout for outbound peer
 	// queries. Zero → defaultPeerTimeout (2s).
 	PeerTimeout time.Duration
+
+	// UseProposer enables the MICorrelationProposer instead of the DisabledProposer.
+	// When false (default in tests), the proposer is a silent no-op.
+	UseProposer bool
+	// ProposerThreshold is the |Pearson r| threshold to emit a candidate.
+	// Defaults to 0.85 when UseProposer is true and the field is zero.
+	ProposerThreshold float64
+	// ProposerMinPairs is the minimum number of paired observations required
+	// before correlation is evaluated. Defaults to 30.
+	ProposerMinPairs int
+	// ProposerBufSize is the ring buffer capacity per construct pair. Defaults to 120.
+	ProposerBufSize int
 }
 
 func DefaultConfig() Config {
@@ -195,7 +207,24 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 	}
 
 	reasoner := minimal.NewRuleEngineReasoner(storage, ontology, cfg.MinTrustScore, peerRegistry, peerClient)
-	proposer := minimal.NewDisabledProposer()
+	var proposer contracts.ProposerContract
+	if cfg.UseProposer {
+		thresh := cfg.ProposerThreshold
+		if thresh == 0 {
+			thresh = 0.85
+		}
+		minPairs := cfg.ProposerMinPairs
+		if minPairs == 0 {
+			minPairs = 30
+		}
+		bufSize := cfg.ProposerBufSize
+		if bufSize == 0 {
+			bufSize = 120
+		}
+		proposer = minimal.NewMICorrelationProposer(ontology, thresh, minPairs, bufSize)
+	} else {
+		proposer = minimal.NewDisabledProposer()
+	}
 
 	// Apply calibrated proposition strengths from the pipeline before seeding
 	// storage. Per-KD edge weights (if any) are applied during seeding.

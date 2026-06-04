@@ -28,6 +28,7 @@
   let selectedEdge = null;        // EdgeDTO currently shown in panel (edge mode)
   let selectedNodeID = null;      // ConstructID currently shown in panel (node mode)
   let autoRefreshHandle = null;   // setInterval id when auto-refresh is on
+  let showingCandidates = false;  // whether the candidates panel is currently visible
 
   // ── DOM refs ────────────────────────────────────────────────────────────
 
@@ -81,6 +82,10 @@
     modalSubmit:   $('modal-submit'),
 
     toasts: $('toasts'),
+
+    candidatesChip: $('candidates-chip'),
+    panelCandidates: $('panel-candidates'),
+    candidatesList: $('candidates-list'),
   };
 
   // ── HTTP helpers ────────────────────────────────────────────────────────
@@ -541,6 +546,72 @@
     }
   }
 
+  // ── Candidates ───────────────────────────────────────────────────────────────
+
+  async function loadCandidates() {
+    try {
+      const resp = await fetch('/candidates');
+      if (!resp.ok) return;
+      const candidates = await resp.json();
+      updateCandidatesChip(candidates);
+      renderCandidatesList(candidates);
+    } catch (e) {
+      console.warn('candidates fetch failed', e);
+    }
+  }
+
+  function updateCandidatesChip(candidates) {
+    const chip = els.candidatesChip;
+    if (!chip) return;
+    const n = candidates ? candidates.length : 0;
+    chip.textContent = n + ' candidate' + (n !== 1 ? 's' : '');
+    chip.classList.toggle('hidden', n === 0);
+  }
+
+  function renderCandidatesList(candidates) {
+    const el = els.candidatesList;
+    if (!el) return;
+    if (!candidates || candidates.length === 0) {
+      el.innerHTML = '<p class="empty">No pending candidates.</p>';
+      return;
+    }
+    el.innerHTML = candidates.map(c => `
+      <div class="candidate-card">
+        <div class="candidate-header">
+          <strong>${escapeHTML(c.FromID)} &rarr; ${escapeHTML(c.ToID)}</strong>
+          <span class="direction ${c.Direction === 1 ? 'pos' : 'neg'}">${c.Direction === 1 ? '+' : '−'}</span>
+        </div>
+        <div class="candidate-meta">
+          r=${(c.MIScore || 0).toFixed(3)} &nbsp; p=${(c.PValue || 0).toFixed(4)} &nbsp; n=${c.NObservations || 0}
+        </div>
+        <div class="candidate-actions">
+          <button onclick="window.__reviewCandidate('${escapeHTML(c.CandidateID)}','confirm')" class="btn-confirm">Confirm</button>
+          <button onclick="window.__reviewCandidate('${escapeHTML(c.CandidateID)}','reject')" class="btn-reject">Reject</button>
+          <button onclick="window.__reviewCandidate('${escapeHTML(c.CandidateID)}','defer')" class="btn-defer">Defer</button>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  async function reviewCandidate(id, action) {
+    try {
+      const resp = await fetch(`/candidates/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ error: resp.statusText }));
+        toast('Error: ' + (err.error || resp.statusText), 'error');
+        return;
+      }
+      toast(`Candidate ${action}ed`, 'success');
+      await loadAll(); // refresh graph and candidates
+    } catch (e) {
+      toast('Request failed: ' + e.message, 'error');
+    }
+  }
+
+  // Expose reviewCandidate globally so inline onclick handlers in the
+  // candidates list can reach it from inside the IIFE.
+  window.__reviewCandidate = reviewCandidate;
+
   // ── Data load ───────────────────────────────────────────────────────────
 
   async function loadAll() {
@@ -566,6 +637,7 @@
         else showEmptyPanel();
       }
       await refreshHealth();
+      await loadCandidates();
     } catch (err) {
       toast(err.message || String(err), 'error');
       els.healthDot.className = 'health-dot health-bad';
@@ -599,6 +671,25 @@
       ev.preventDefault();
       closeModal();
     });
+
+    // Candidates chip click: toggle the candidates panel.
+    if (els.candidatesChip) {
+      els.candidatesChip.addEventListener('click', () => {
+        showingCandidates = !showingCandidates;
+        if (showingCandidates) {
+          // Hide other sections; show candidates.
+          els.panelEmpty.classList.add('hidden');
+          els.panelNode.classList.add('hidden');
+          els.panelEdge.classList.add('hidden');
+          els.panelCandidates.classList.remove('hidden');
+          // Re-render with latest data.
+          loadCandidates();
+        } else {
+          els.panelCandidates.classList.add('hidden');
+          showEmptyPanel();
+        }
+      });
+    }
 
     // ESC inside <dialog> fires a "cancel" event, then closes. Nothing to do.
   }

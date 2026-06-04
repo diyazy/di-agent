@@ -57,6 +57,18 @@ func RunProposerCompliance(t *testing.T, factory ProposerFactory) {
 		}
 	})
 
+	t.Run("ObserveConstructDoesNotError", func(t *testing.T) {
+		p := factory(t)
+		for i := 0; i < 20; i++ {
+			if err := p.ObserveConstruct("RC", float64(i)*0.01); err != nil {
+				t.Errorf("ObserveConstruct must not error; got %v", err)
+			}
+			if err := p.ObserveConstruct("PS", float64(i)*0.008); err != nil {
+				t.Errorf("ObserveConstruct must not error; got %v", err)
+			}
+		}
+	})
+
 	// ── GetCandidates ─────────────────────────────────────────────────────────
 
 	t.Run("GetCandidatesReturnsOnlyPending", func(t *testing.T) {

@@ -111,12 +111,25 @@ func (m *SemanticMap) Ingest(fromID, toID string, observation float64, eventID s
 // touches that construct, and calls UpdateEdge on each unique (from, to)
 // pair. Idempotency is per-edge — replaying the same sample is a no-op.
 //
+// After the Bridge runs, the proposer is notified via ObserveConstruct so it
+// can pair the new value against every other construct it has seen. Errors
+// from ObserveConstruct are intentionally swallowed — the proposer is advisory
+// and must not block telemetry ingestion.
+//
 // Returns nil even when the metric type has no mapping (forward-compat with
 // future MetricTypes). Per-edge errors are returned (first one wins) so the
 // caller can decide whether to keep looping; the Bridge itself processes
 // every reachable edge regardless of individual failures.
 func (m *SemanticMap) IngestSample(sample *types.MetricSample) error {
-	return Bridge(sample, m.ontology, m.updater)
+	if err := Bridge(sample, m.ontology, m.updater); err != nil {
+		return err
+	}
+	if m.proposer != nil {
+		if construct, ok := ConstructForMetric(sample.MetricType); ok {
+			_ = m.proposer.ObserveConstruct(construct, sample.Value)
+		}
+	}
+	return nil
 }
 
 // ── Graph extension ───────────────────────────────────────────────────────────

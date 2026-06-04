@@ -63,6 +63,13 @@ func TestDisabledProposerCompliance(t *testing.T) {
 	})
 }
 
+func TestMICorrelationProposerCompliance(t *testing.T) {
+	compliance.RunProposerCompliance(t, func(t *testing.T) contracts.ProposerContract {
+		o := minimal.NewStaticDiSelectOntology()
+		return minimal.NewMICorrelationProposer(o, 0.8, 10, 50)
+	})
+}
+
 // TestReasonerSkipsDeprecatedPropositions verifies the live-ontology
 // behavior end-to-end: when the Ontology deprecates a proposition, the
 // Reasoner must exclude its edge from cost computation. The graph path

@@ -22,6 +22,14 @@ var metricTypeToConstruct = map[types.MetricType]string{
 	types.NetworkLatencyMs:    "CO",
 }
 
+// ConstructForMetric returns the primary construct for a MetricType, and
+// whether the type is known. Used by callers (e.g. IngestSample) that need
+// the construct ID without running the full Bridge.
+func ConstructForMetric(mt types.MetricType) (string, bool) {
+	c, ok := metricTypeToConstruct[mt]
+	return c, ok
+}
+
 // edgeUpdater is the slim subset of UpdaterContract the Bridge depends on.
 // Defined separately so tests can supply a lightweight stub that counts calls
 // without implementing UpdateNode/Reset.

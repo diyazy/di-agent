@@ -751,6 +751,83 @@ func peerByURL(t *testing.T, sm *semmap.SemanticMap, url string) *peers.Descript
 	return d
 }
 
+// ── Scenario 8: ProposerNaturalDiscovery — full propose→confirm loop ─────────
+//
+// Verifies the full propose-then-confirm loop driven by natural telemetry
+// ingestion:
+//  1. Seed the SM with the edge-minimal profile (15 backbone propositions).
+//  2. Feed 60 observations that drive a strong CE↔RC correlation that does NOT
+//     currently exist in the backbone. (CE→RC is not one of P1-P15.)
+//  3. The proposer generates a PendingCandidate for that pair.
+//  4. Operator Confirms the candidate → backbone grows to 16 propositions.
+//  5. Verified: a new non-deprecated proposition covering CE↔RC exists.
+func TestEvolution_ProposerNaturalDiscovery(t *testing.T) {
+	s := minimal.NewInMemoryStorage()
+	o := minimal.NewStaticDiSelectOntology()
+	seedReasonerState(t, s, o)
+
+	u := minimal.NewEMAUpdater(s, 0.2, 500)
+	proposer := minimal.NewMICorrelationProposer(o, 0.7, 20, 80)
+	r := minimal.NewRuleEngineReasoner(s, o, 0.5, nil, nil)
+
+	sm := semmap.New(s, o, u, r, proposer)
+	_ = sm // used indirectly; proposer is wired into sm but we call proposer directly
+
+	// Ingest 60 samples driving CE↔RC correlation:
+	// CE (community ecosystem) and RC (resource constraints) are not linked
+	// in the bootstrap — a strong correlation should generate a candidate.
+	for i := 0; i < 60; i++ {
+		x := float64(i) / 60.0
+		y := x*0.95 + 0.02 // strong positive linear correlation
+		_ = proposer.ObserveConstruct("CE", x)
+		_ = proposer.ObserveConstruct("RC", y)
+	}
+
+	candidates, err := proposer.GetCandidates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cand *types.CandidateEdge
+	for _, c := range candidates {
+		if (c.FromID == "CE" && c.ToID == "RC") || (c.FromID == "RC" && c.ToID == "CE") {
+			cand = c
+			break
+		}
+	}
+	if cand == nil {
+		t.Fatal("expected proposer to generate a CE↔RC candidate after 60 correlated observations")
+	}
+	if cand.PValue >= 0.05 {
+		t.Errorf("expected significant p-value (< 0.05); got %.4f", cand.PValue)
+	}
+
+	// Confirm the candidate — backbone grows.
+	if err := proposer.Confirm(cand.CandidateID); err != nil {
+		t.Fatal(err)
+	}
+
+	props, err := o.Propositions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(props) != 16 {
+		t.Errorf("expected 16 propositions after confirm; got %d", len(props))
+	}
+
+	// Verified: a new proposition covering CE↔RC exists and is not deprecated.
+	var found bool
+	for _, p := range props {
+		if !p.Deprecated && ((p.FromConstruct == "CE" && p.ToConstruct == "RC") ||
+			(p.FromConstruct == "RC" && p.ToConstruct == "CE")) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("confirmed CE↔RC proposition not found in backbone")
+	}
+}
+
 // findPriorWeightsFileForScenarios walks up to locate prior_weights.json so
 // scenarios are runnable from any working directory the test runner picks.
 func findPriorWeightsFileForScenarios(t *testing.T) string {

@@ -17,6 +17,7 @@
     <div class="header-meta">
       <span id="health-dot" class="health-dot health-unknown" title="agent health"></span>
       <span id="health-label">checking&hellip;</span>
+      <span id="candidates-chip" class="chip hidden" title="Pending candidates">0 candidates</span>
       <label class="auto-refresh">
         <input type="checkbox" id="auto-refresh" /> auto-refresh (5s)
       </label>
@@ -55,6 +56,11 @@
         </ul>
 
         <p class="hint small">Constructs are append-only — they have no mutation actions. Click any related edge to inspect or mutate it.</p>
+      </section>
+
+      <section id="panel-candidates" class="panel-section hidden">
+        <h2>Pending Candidates</h2>
+        <div id="candidates-list"></div>
       </section>
 
       <section id="panel-edge" class="panel-section hidden">

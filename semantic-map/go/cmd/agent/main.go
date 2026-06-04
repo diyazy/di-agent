@@ -70,6 +70,8 @@ func main() {
 			"(e.g. http://node_1:8080,http://node_2:8080). RecommendPeer ranks "+
 			"these by trust-weighted savings. Additional peers can be added at "+
 			"runtime via POST /peers.")
+	var useProposer bool
+	flag.BoolVar(&useProposer, "proposer", true, "enable MI correlation proposer (disable for low-CPU devices)")
 	flag.Parse()
 
 	if *nodeID == "" {
@@ -90,6 +92,7 @@ func main() {
 		CgroupRoot:           *cgroupRoot,
 		CollectInterval:      *collectInterval,
 		PeerURLs:             peerURLs,
+		UseProposer:          useProposer,
 	}
 
 	sm, collector, err := profiles.Build(*profileName, cfg)
