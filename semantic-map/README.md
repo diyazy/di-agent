@@ -453,6 +453,7 @@ documented at the top of `cmd/replay/compare/runner.go`.
 | `-collect-interval` | `10s`            | How often the autonomous collection loop ticks the profile's collector. Set to `0` to disable the loop (only manual `POST /ingest` will update edges). |
 | `-cgroup-root`      | `/sys/fs/cgroup` | Filesystem root the cgroup collector reads from. Empty string disables the loop (useful on macOS dev machines or nodes without cgroups v2). |
 | `-node-id`          | `""`             | Identifier this agent puts on emitted `MetricSample`s and uses in event IDs. Empty falls back to `os.Hostname()`. |
+| `-proposer`         | `true`           | Enable `MICorrelationProposer` (Fisher z p-values, construct-level pairing). Set `false` on nodes where ring-buffer overhead is undesirable; the daemon falls back to `DisabledProposer` (no-op). |
 
 ---
 
