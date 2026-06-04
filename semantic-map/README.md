@@ -120,7 +120,9 @@ semantic-map/
     │
     ├── internal/               Implementation packages — not importable externally
     │   └── minimal/            edge-minimal profile implementations
-    │       ├── collector_cgroup.go  CgroupCollector  (cgroups v2, no daemon)
+    │       ├── collector_cgroup.go   CgroupCollector   (cgroups v2, no daemon)
+    │       ├── collector_netdata.go  NetdataCollector  (Netdata HTTP API v1, system.cpu/ram/net)
+    │       ├── multi_collector.go    MultiCollector    (fan-out to N collectors)
     │       ├── storage.go      InMemoryStorage        (multigraph, keyed by from→to:propID)
     │       ├── ontology.go     StaticDiSelectOntology (7 constructs + P1–P15; live audit log)
     │       ├── updater.go      EMAUpdater             (idempotency, reset; multigraph-aware)
@@ -453,6 +455,7 @@ documented at the top of `cmd/replay/compare/runner.go`.
 | `-collect-interval` | `10s`            | How often the autonomous collection loop ticks the profile's collector. Set to `0` to disable the loop (only manual `POST /ingest` will update edges). |
 | `-cgroup-root`      | `/sys/fs/cgroup` | Filesystem root the cgroup collector reads from. Empty string disables the loop (useful on macOS dev machines or nodes without cgroups v2). |
 | `-node-id`          | `""`             | Identifier this agent puts on emitted `MetricSample`s and uses in event IDs. Empty falls back to `os.Hostname()`. |
+| `-netdata-url`      | `""`             | Base URL of a Netdata daemon to poll for live node metrics (e.g. `http://localhost:19999`). Empty disables Netdata collection. When set together with `-cgroup-root`, both run as a `MultiCollector`. |
 | `-proposer`         | `true`           | Enable `MICorrelationProposer` (Fisher z p-values, construct-level pairing). Set `false` on nodes where ring-buffer overhead is undesirable; the daemon falls back to `DisabledProposer` (no-op). |
 
 ---
