@@ -167,6 +167,26 @@ type MetricSample struct {
 	Labels        map[string]string // informational; bridge must not branch on these
 }
 
+// ── Tuner types ───────────────────────────────────────────────────────────────
+
+// TuneIntent is the raw output of TunerContract.ParseIntent — a signed delta
+// to apply to one proposition's prior strength.
+type TuneIntent struct {
+	PropositionID string
+	Delta         float64 // signed: +0.12 to increase, -0.12 to decrease
+	Rationale     string  // e.g. "intent:prioritize security (keyword: security, direction: increase)"
+}
+
+// TuneAdjustment is a finalized, bounded adjustment ready for application.
+// OldStrength is the proposition's strength before the tune.
+// NewStrength = clamp(OldStrength + Delta, propositionFloor, 0.95).
+type TuneAdjustment struct {
+	PropositionID string
+	OldStrength   float64
+	NewStrength   float64
+	Rationale     string
+}
+
 // ── Proposer types ────────────────────────────────────────────────────────────
 
 type CandidateEdge struct {

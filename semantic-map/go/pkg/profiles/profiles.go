@@ -90,6 +90,12 @@ type Config struct {
 	ProposerMinPairs int
 	// ProposerBufSize is the ring buffer capacity per construct pair. Defaults to 120.
 	ProposerBufSize int
+
+	// UseRuleBasedTuner enables the RuleBasedTuner instead of the DisabledTuner.
+	// When true (default for edge-minimal), natural-language operator intent can be
+	// mapped to proposition strength adjustments via SemanticMap.Tune / POST /agent/tune.
+	// Set false to disable operator tuning entirely.
+	UseRuleBasedTuner bool
 }
 
 func DefaultConfig() Config {
@@ -99,6 +105,7 @@ func DefaultConfig() Config {
 		MinTrustScore:        0.5,
 		PriorWeightsPath:     "",
 		KD:                   "",
+		UseRuleBasedTuner:    true,
 	}
 }
 
@@ -231,6 +238,13 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 		proposer = minimal.NewDisabledProposer()
 	}
 
+	var tuner contracts.TunerContract
+	if cfg.UseRuleBasedTuner {
+		tuner = minimal.NewRuleBasedTuner()
+	} else {
+		tuner = minimal.NewDisabledTuner()
+	}
+
 	// Apply calibrated proposition strengths from the pipeline before seeding
 	// storage. Per-KD edge weights (if any) are applied during seeding.
 	if pw != nil {
@@ -239,7 +253,7 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 
 	seedFromOntology(storage, ontology, pw, cfg.KD)
 
-	sm := semmap.NewWithPeers(storage, ontology, updater, reasoner, proposer, peerRegistry, peerClient)
+	sm := semmap.NewWithPeers(storage, ontology, updater, reasoner, proposer, tuner, peerRegistry, peerClient)
 
 	// Build collector(s): Netdata, Cgroup, or both via MultiCollector.
 	// Empty CgroupRoot/NodeID or empty NetdataURL disables the respective

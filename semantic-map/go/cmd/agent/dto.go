@@ -55,6 +55,26 @@ type ResetRequest struct {
 	To   string `json:"to"`
 }
 
+// TuneRequest is the body of POST /agent/tune.
+type TuneRequest struct {
+	Intent   string `json:"intent"`
+	Operator string `json:"operator,omitempty"`
+}
+
+// TuneAdjustmentDTO mirrors types.TuneAdjustment for the wire.
+type TuneAdjustmentDTO struct {
+	PropositionID string  `json:"proposition_id"`
+	OldStrength   float64 `json:"old_strength"`
+	NewStrength   float64 `json:"new_strength"`
+	Rationale     string  `json:"rationale"`
+}
+
+// TuneResponse is the body of a successful POST /agent/tune.
+type TuneResponse struct {
+	Applied []TuneAdjustmentDTO `json:"applied"`
+	Intent  string              `json:"intent"`
+}
+
 // MetricSampleRequest is the body of POST /ingest-sample.
 //
 // Distinct from POST /ingest: where /ingest takes a pre-routed (from_id,
@@ -276,6 +296,15 @@ var knownMetricTypes = map[types.MetricType]struct{}{
 	types.NetworkTxBps:        {},
 	types.NetworkLossRatio:    {},
 	types.NetworkLatencyMs:    {},
+}
+
+func tuneAdjToDTO(a *types.TuneAdjustment) TuneAdjustmentDTO {
+	return TuneAdjustmentDTO{
+		PropositionID: a.PropositionID,
+		OldStrength:   a.OldStrength,
+		NewStrength:   a.NewStrength,
+		Rationale:     a.Rationale,
+	}
 }
 
 // sampleRequestToTypes converts the wire DTO into a *types.MetricSample,

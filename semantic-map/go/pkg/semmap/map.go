@@ -3,6 +3,7 @@
 package semmap
 
 import (
+	"log"
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/contracts"
@@ -10,7 +11,7 @@ import (
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
-// SemanticMap wires the five contracts and exposes the agent API. It also
+// SemanticMap wires the six contracts and exposes the agent API. It also
 // holds the peer coordination handles (peers.Registry, peers.Client) so the
 // HTTP layer and the reasoner share a single source of truth for peers.
 type SemanticMap struct {
@@ -19,6 +20,7 @@ type SemanticMap struct {
 	updater  contracts.UpdaterContract
 	reasoner contracts.ReasonerContract
 	proposer contracts.ProposerContract
+	tuner    contracts.TunerContract
 
 	peers *peers.Registry
 	peerc *peers.Client
@@ -34,8 +36,16 @@ func New(
 	updater contracts.UpdaterContract,
 	reasoner contracts.ReasonerContract,
 	proposer contracts.ProposerContract,
+	tuner contracts.TunerContract,
 ) *SemanticMap {
-	return &SemanticMap{storage: storage, ontology: ontology, updater: updater, reasoner: reasoner, proposer: proposer}
+	return &SemanticMap{
+		storage:  storage,
+		ontology: ontology,
+		updater:  updater,
+		reasoner: reasoner,
+		proposer: proposer,
+		tuner:    tuner,
+	}
 }
 
 // NewWithPeers is the peer-aware constructor used by profiles.Build. Both
@@ -47,6 +57,7 @@ func NewWithPeers(
 	updater contracts.UpdaterContract,
 	reasoner contracts.ReasonerContract,
 	proposer contracts.ProposerContract,
+	tuner contracts.TunerContract,
 	peerRegistry *peers.Registry,
 	peerClient *peers.Client,
 ) *SemanticMap {
@@ -56,6 +67,7 @@ func NewWithPeers(
 		updater:  updater,
 		reasoner: reasoner,
 		proposer: proposer,
+		tuner:    tuner,
 		peers:    peerRegistry,
 		peerc:    peerClient,
 	}
@@ -218,4 +230,99 @@ func (m *SemanticMap) AddValidatedProposition(p *types.Proposition) error {
 // ResetEdge restores every edge between (from, to) to its prior state.
 func (m *SemanticMap) ResetEdge(from, to string) error {
 	return m.updater.Reset(from, to)
+}
+
+// ── Operator tuning ───────────────────────────────────────────────────────────
+
+// tuneFloor returns the minimum allowed strength for a proposition.
+// SC-related propositions have a higher floor so security stays meaningful
+// even under resource pressure. This duplicates the logic in
+// internal/minimal/tuner.go — the two packages cannot import each other, so
+// the function is intentionally duplicated here.
+func tuneFloor(propID string) float64 {
+	switch propID {
+	case "P1", "P4", "P11", "P14":
+		return 0.30
+	default:
+		return 0.10
+	}
+}
+
+// Tune parses the operator's natural-language intent, resolves current
+// proposition strengths, computes bounded adjustments, validates them,
+// applies each via SetPropositionStrength, and records the consolidated
+// intent in the audit log.
+//
+// Returns the list of adjustments that were actually applied. Returns
+// (empty, nil) when the intent is unrecognized. Partial success is not
+// possible: if any adjustment fails to apply, Tune returns the error after
+// having applied all preceding adjustments (fail-forward, logged).
+func (m *SemanticMap) Tune(text, operator string) ([]*types.TuneAdjustment, error) {
+	if m.tuner == nil {
+		return nil, nil
+	}
+
+	intents, err := m.tuner.ParseIntent(text)
+	if err != nil {
+		return nil, err
+	}
+	if len(intents) == 0 {
+		return nil, nil
+	}
+
+	// Resolve current strengths from ontology.
+	props, err := m.ontology.Propositions()
+	if err != nil {
+		return nil, err
+	}
+	strengthByID := make(map[string]float64, len(props))
+	for _, p := range props {
+		strengthByID[p.PropositionID] = p.PriorStrength
+	}
+
+	// Build bounded adjustments.
+	adjustments := make([]*types.TuneAdjustment, 0, len(intents))
+	for _, intent := range intents {
+		old, ok := strengthByID[intent.PropositionID]
+		if !ok {
+			continue // proposition not found — skip silently
+		}
+		floor := tuneFloor(intent.PropositionID)
+		newS := old + intent.Delta
+		if newS < floor {
+			newS = floor
+		}
+		if newS > 0.95 {
+			newS = 0.95
+		}
+		adjustments = append(adjustments, &types.TuneAdjustment{
+			PropositionID: intent.PropositionID,
+			OldStrength:   old,
+			NewStrength:   newS,
+			Rationale:     intent.Rationale,
+		})
+	}
+
+	// Validate final values.
+	if err := m.tuner.Validate(adjustments); err != nil {
+		return nil, err
+	}
+
+	// Apply and collect results.
+	var applied []*types.TuneAdjustment
+	var appliedIDs []string
+	for _, a := range adjustments {
+		if err := m.ontology.SetPropositionStrength(a.PropositionID, a.NewStrength); err != nil {
+			return applied, err
+		}
+		applied = append(applied, a)
+		appliedIDs = append(appliedIDs, a.PropositionID)
+	}
+
+	// Best-effort audit record — don't fail tune on logging failure.
+	if err := m.ontology.RecordTune(text, operator, appliedIDs); err != nil {
+		log.Printf("SemanticMap.Tune: RecordTune failed: %v", err)
+	}
+
+	return applied, nil
 }

@@ -187,3 +187,25 @@ type AddPeerRequest struct {
 type SetTrustRequest struct {
 	Value float64 `json:"value"`
 }
+
+// ── Tuner DTOs ────────────────────────────────────────────────────────────────
+
+// TuneRequest is the body of POST /agent/tune.
+type TuneRequest struct {
+	Intent   string `json:"intent"`
+	Operator string `json:"operator,omitempty"`
+}
+
+// TuneAdjustmentDTO mirrors types.TuneAdjustment on the wire.
+type TuneAdjustmentDTO struct {
+	PropositionID string  `json:"proposition_id"`
+	OldStrength   float64 `json:"old_strength"`
+	NewStrength   float64 `json:"new_strength"`
+	Rationale     string  `json:"rationale"`
+}
+
+// TuneResponse is the response of POST /agent/tune.
+type TuneResponse struct {
+	Applied []TuneAdjustmentDTO `json:"applied"`
+	Intent  string              `json:"intent"`
+}

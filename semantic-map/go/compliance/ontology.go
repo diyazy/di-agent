@@ -399,6 +399,33 @@ func RunOntologyCompliance(t *testing.T, factory OntologyFactory) {
 		}
 	})
 
+	t.Run("RecordTuneAppendsAuditEvent", func(t *testing.T) {
+		o := factory(t)
+		err := o.RecordTune("prioritize security", "operator:alice", []string{"P1", "P11"})
+		if errors.Is(err, contracts.ErrNotImplemented) {
+			t.Skip("implementation does not support RecordTune")
+		}
+		if err != nil {
+			t.Fatalf("RecordTune must not error; got %v", err)
+		}
+		events, _ := o.GetHistory(time.Time{})
+		found := false
+		for _, e := range events {
+			if string(e.Kind) == "operator-tune" {
+				found = true
+				if e.Detail["intent"] != "prioritize security" {
+					t.Errorf("expected intent='prioritize security'; got %v", e.Detail["intent"])
+				}
+				if e.Actor != "operator:alice" {
+					t.Errorf("expected actor='operator:alice'; got %q", e.Actor)
+				}
+			}
+		}
+		if !found {
+			t.Error("RecordTune must append an 'operator-tune' event visible in GetHistory")
+		}
+	})
+
 	t.Run("HistorySinceFilter", func(t *testing.T) {
 		o := factory(t)
 		ps, _ := o.Propositions()

@@ -103,6 +103,18 @@ func TestMICorrelationProposerCompliance(t *testing.T) {
 	})
 }
 
+func TestRuleBasedTunerCompliance(t *testing.T) {
+	compliance.RunTunerCompliance(t, func(t *testing.T) contracts.TunerContract {
+		return minimal.NewRuleBasedTuner()
+	})
+}
+
+func TestDisabledTunerCompliance(t *testing.T) {
+	compliance.RunTunerCompliance(t, func(t *testing.T) contracts.TunerContract {
+		return minimal.NewDisabledTuner()
+	})
+}
+
 // TestReasonerSkipsDeprecatedPropositions verifies the live-ontology
 // behavior end-to-end: when the Ontology deprecates a proposition, the
 // Reasoner must exclude its edge from cost computation. The graph path

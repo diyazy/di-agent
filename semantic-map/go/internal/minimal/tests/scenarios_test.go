@@ -67,7 +67,7 @@ func newScenarioAgent(t *testing.T) *scenarioAgent {
 	seedReasonerState(t, storage, ontology)
 
 	return &scenarioAgent{
-		sm:       semmap.New(storage, ontology, updater, reasoner, proposer),
+		sm:       semmap.New(storage, ontology, updater, reasoner, proposer, minimal.NewDisabledTuner()),
 		storage:  storage,
 		ontology: ontology,
 		updater:  updater,
@@ -770,7 +770,7 @@ func TestEvolution_ProposerNaturalDiscovery(t *testing.T) {
 	proposer := minimal.NewMICorrelationProposer(o, 0.7, 20, 80)
 	r := minimal.NewRuleEngineReasoner(s, o, 0.5, nil, nil)
 
-	sm := semmap.New(s, o, u, r, proposer)
+	sm := semmap.New(s, o, u, r, proposer, minimal.NewDisabledTuner())
 	_ = sm // used indirectly; proposer is wired into sm but we call proposer directly
 
 	// Ingest 60 samples driving CE↔RC correlation:
@@ -826,6 +826,84 @@ func TestEvolution_ProposerNaturalDiscovery(t *testing.T) {
 	if !found {
 		t.Error("confirmed CE↔RC proposition not found in backbone")
 	}
+}
+
+// ── Scenario 9: Operator Tune and Audit Trail ─────────────────────────────────
+//
+// Verifies the full operator-tuning pipeline:
+//  1. Build an SM with the RuleBasedTuner.
+//  2. Tune "prioritize security" — expect P1 and/or P11 to increase.
+//  3. Verify the history contains an "operator-tune" event with the intent text.
+//  4. Verify that CostOfAction after tuning is traversable without error.
+func TestEvolution_OperatorTuneAndAuditTrail(t *testing.T) {
+	s := minimal.NewInMemoryStorage()
+	o := minimal.NewStaticDiSelectOntology()
+	seedReasonerState(t, s, o)
+
+	u := minimal.NewEMAUpdater(s, 0.2, 500)
+	r := minimal.NewRuleEngineReasoner(s, o, 0.5, nil, nil)
+	proposer := minimal.NewDisabledProposer()
+	tuner := minimal.NewRuleBasedTuner()
+
+	sm := semmap.New(s, o, u, r, proposer, tuner)
+
+	costBefore, err := r.CostOfAction("pod-scheduling", "node_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	applied, err := sm.Tune("prioritize security", "test-operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(applied) == 0 {
+		t.Fatal("expected at least one adjustment for 'prioritize security'")
+	}
+
+	// P1 or P11 must be in the applied list and must have increased.
+	found := false
+	for _, a := range applied {
+		if a.PropositionID == "P1" || a.PropositionID == "P11" {
+			found = true
+			if a.NewStrength <= a.OldStrength {
+				t.Errorf("%s: expected strength to increase; got %.3f → %.3f",
+					a.PropositionID, a.OldStrength, a.NewStrength)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected P1 or P11 in applied adjustments for 'prioritize security'")
+	}
+
+	// Audit trail: history must contain "operator-tune" event.
+	events, err := o.GetHistory(time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tuneEvent *types.OntologyEvent
+	for _, e := range events {
+		if string(e.Kind) == "operator-tune" {
+			tuneEvent = e
+			break
+		}
+	}
+	if tuneEvent == nil {
+		t.Fatal("expected 'operator-tune' event in history")
+	}
+	if tuneEvent.Detail["intent"] != "prioritize security" {
+		t.Errorf("operator-tune event has wrong intent: %v", tuneEvent.Detail["intent"])
+	}
+	if tuneEvent.Actor != "test-operator" {
+		t.Errorf("operator-tune event has wrong actor: %q", tuneEvent.Actor)
+	}
+
+	// After tuning, cost is still computable (graph still traversable).
+	costAfter, err := r.CostOfAction("pod-scheduling", "node_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("cost before tune: energy=%.4f; cost after: energy=%.4f",
+		costBefore.EnergyCost, costAfter.EnergyCost)
 }
 
 // findPriorWeightsFileForScenarios walks up to locate prior_weights.json so

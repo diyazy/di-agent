@@ -315,3 +315,16 @@ func (c *Client) SetPeerTrust(ctx context.Context, id string, value float64) err
 	return c.postJSON(ctx, "/peers/"+url.PathEscape(id)+"/trust",
 		SetTrustRequest{Value: value}, nil)
 }
+
+// ── Operator tuning ───────────────────────────────────────────────────────────
+
+// Tune sends a natural-language intent string to the daemon and returns
+// the applied proposition adjustments.
+func (c *Client) Tune(ctx context.Context, intent, operator string) (*TuneResponse, error) {
+	body := TuneRequest{Intent: intent, Operator: operator}
+	var resp TuneResponse
+	if err := c.postJSON(ctx, "/agent/tune", body, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}

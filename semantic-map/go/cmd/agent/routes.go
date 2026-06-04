@@ -24,6 +24,7 @@ package main
 // /ontology/construct               POST    AddConstructRequest            204
 // /ontology/proposition             POST    AddPropositionRequest          204
 // /agent/reset                      POST    ResetRequest                   204
+// /agent/tune                       POST    TuneRequest                    200 TuneResponse
 // /candidates/{id}/confirm          POST    —                              204
 // /candidates/{id}/reject           POST    —                              204
 // /candidates/{id}/defer            POST    —                              204
@@ -457,6 +458,33 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
+	})
+
+	// POST /agent/tune — natural-language operator intent → proposition adjustments
+	mux.HandleFunc("POST /agent/tune", func(w http.ResponseWriter, r *http.Request) {
+		if err := requireJSON(r); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		var req TuneRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		if req.Intent == "" {
+			writeError(w, http.StatusBadRequest, "intent must not be empty")
+			return
+		}
+		applied, err := sm.Tune(req.Intent, req.Operator)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		dtos := make([]TuneAdjustmentDTO, len(applied))
+		for i, a := range applied {
+			dtos[i] = tuneAdjToDTO(a)
+		}
+		writeJSON(w, TuneResponse{Applied: dtos, Intent: req.Intent})
 	})
 
 	// POST /ingest-sample — Bridge-routed telemetry from external collectors.

@@ -657,6 +657,52 @@
     }
   }
 
+  // ── Operator Tune ──────────────────────────────────────────────────────
+
+  async function submitTune() {
+    const input = document.getElementById('tune-input');
+    const text = input ? input.value.trim() : '';
+    if (!text) return;
+    try {
+      const resp = await fetch('/agent/tune', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ intent: text, operator: 'ui' })
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        toast('Tune error: ' + (data.error || resp.statusText), 'error');
+        return;
+      }
+      const resultEl = document.getElementById('tune-result');
+      if (data.applied && data.applied.length > 0) {
+        const summary = data.applied.map(a =>
+          `${a.proposition_id}: ${a.old_strength.toFixed(3)} → ${a.new_strength.toFixed(3)}`
+        ).join(', ');
+        toast('Tuned: ' + summary, 'success');
+        if (resultEl) {
+          resultEl.innerHTML =
+            '<ul>' + data.applied.map(a =>
+              '<li><strong>' + escapeHTML(a.proposition_id) + '</strong> ' +
+              a.old_strength.toFixed(3) + ' → ' + a.new_strength.toFixed(3) +
+              '<br><small>' + escapeHTML(a.rationale) + '</small></li>'
+            ).join('') + '</ul>';
+        }
+      } else {
+        toast('Intent not recognized — no adjustments applied.', 'success');
+        if (resultEl) {
+          resultEl.innerHTML = '<p class="empty">No adjustments.</p>';
+        }
+      }
+      await loadAll();
+    } catch (e) {
+      toast('Tune failed: ' + e.message, 'error');
+    }
+  }
+
+  // Expose submitTune globally so the inline onclick on #tune-btn can reach it.
+  window.submitTune = submitTune;
+
   // ── Wire up event listeners ─────────────────────────────────────────────
 
   function wire() {
@@ -703,5 +749,13 @@
     }
     wire();
     loadAll();
+
+    // Wire Enter key on tune input.
+    const tuneInput = document.getElementById('tune-input');
+    if (tuneInput) {
+      tuneInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') submitTune();
+      });
+    }
   });
 })();

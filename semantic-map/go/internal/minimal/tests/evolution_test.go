@@ -59,7 +59,7 @@ func newEvolutionAgentWithConvergence(t *testing.T, collector *scripted.Scripted
 	seedReasonerState(t, storage, ontology)
 
 	return &evolutionAgent{
-		sm:        semmap.New(storage, ontology, updater, reasoner, proposer),
+		sm:        semmap.New(storage, ontology, updater, reasoner, proposer, minimal.NewDisabledTuner()),
 		storage:   storage,
 		ontology:  ontology,
 		updater:   updater,
@@ -592,7 +592,7 @@ func TestEvolution_NewEdgeProposeConfirm(t *testing.T) {
 	// Swap in the proposer-aware ontology so AddValidatedProposition routes
 	// through the same instance the proposer sees.
 	a.ontology = ontology
-	a.sm = semmap.New(a.storage, ontology, a.updater, minimal.NewRuleEngineReasoner(a.storage, ontology, 0.5, nil, nil), proposer)
+	a.sm = semmap.New(a.storage, ontology, a.updater, minimal.NewRuleEngineReasoner(a.storage, ontology, 0.5, nil, nil), proposer, minimal.NewDisabledTuner())
 
 	t.Log("Scenario 6: propose-then-confirm.")
 	t.Log("Drive 150 strongly correlated MU↔PS observations directly to the proposer;")

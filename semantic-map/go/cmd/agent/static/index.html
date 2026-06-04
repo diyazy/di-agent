@@ -63,6 +63,15 @@
         <div id="candidates-list"></div>
       </section>
 
+      <section id="panel-tune">
+        <h3>Operator Tune</h3>
+        <div class="tune-form">
+          <input type="text" id="tune-input" placeholder='e.g. "prioritize security"' autocomplete="off"/>
+          <button id="tune-btn" type="button" onclick="submitTune()">Tune</button>
+        </div>
+        <div id="tune-result"></div>
+      </section>
+
       <section id="panel-edge" class="panel-section hidden">
         <h2>Edge descriptor</h2>
         <p id="ed-description" class="edge-description hint"></p>

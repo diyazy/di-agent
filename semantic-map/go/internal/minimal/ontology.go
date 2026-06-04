@@ -241,6 +241,28 @@ func (o *StaticDiSelectOntology) AddValidatedProposition(p *types.Proposition) e
 	return nil
 }
 
+// RecordTune appends a consolidated "operator-tune" event to the audit log
+// without modifying any proposition strength. It records the operator's intent
+// string alongside the proposition IDs that were adjusted in the same batch.
+// Returns nil (best-effort; never blocks Tune).
+func (o *StaticDiSelectOntology) RecordTune(text, operator string, appliedIDs []string) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.events = append(o.events, &types.OntologyEvent{
+		Timestamp: func() time.Time {
+			if o.now != nil {
+				return o.now()
+			}
+			return time.Now().UTC()
+		}(),
+		Actor:    operator,
+		Kind:     "operator-tune",
+		TargetID: "",
+		Detail:   map[string]any{"intent": text, "proposition_ids": appliedIDs},
+	})
+	return nil
+}
+
 // ── Di-Select bootstrap data ──────────────────────────────────────────────────
 // Construct IDs match the short names used as edge FromID/ToID throughout the system.
 

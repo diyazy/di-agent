@@ -1,4 +1,4 @@
-// Package contracts defines the five interface contracts of the Semantic Map.
+// Package contracts defines the six interface contracts of the Semantic Map.
 //
 // Behavioral guarantees are documented on each interface. All implementations
 // must satisfy these guarantees and pass the shared compliance suite in
@@ -60,6 +60,8 @@ type StorageContract interface {
 //   - Audit log: every mutation (SetPropositionStrength,
 //     AddValidatedProposition, AddConstruct, Deprecate) appends one
 //     OntologyEvent that GetHistory exposes in chronological insertion order.
+//     RecordTune emits an "operator-tune" audit event consolidating a
+//     batch of operator-driven strength adjustments.
 //   - Implementations that intentionally do not support a mutation (e.g. a
 //     truly static cloud-cache implementation) return ErrNotImplemented
 //     from that method rather than silently succeeding.
@@ -79,6 +81,13 @@ type OntologyContract interface {
 	// Audit. Returns events appended at or after `since`; pass zero time to
 	// retrieve the full history. Order is chronological by insertion.
 	GetHistory(since time.Time) ([]*types.OntologyEvent, error)
+
+	// RecordTune appends a consolidated "operator-tune" event to the audit log
+	// without modifying any proposition strength. It records the operator's
+	// intent string alongside the proposition IDs that were adjusted in the
+	// same batch. Implementations that cannot record return nil (best-effort;
+	// never blocks Tune).
+	RecordTune(text, operator string, appliedIDs []string) error
 }
 
 // ErrNotImplemented is returned by an OntologyContract implementation that
@@ -152,6 +161,30 @@ type ProposerContract interface {
 	Reject(candidateID string) error
 	Defer(candidateID string) error
 	GetHistory() ([]*types.CandidateEdge, error)
+}
+
+// ── Tuner ─────────────────────────────────────────────────────────────────────
+
+// TunerContract maps operator natural-language intent to validated proposition
+// strength adjustments. The parser is pluggable — v1 uses a rule-based
+// implementation; a richer profile may substitute an SLM (Phi-3 Mini,
+// Gemma 2B) without changing the contract or the wiring downstream.
+//
+// The Tuner is never in the execution path. It preprocesses intent text into
+// structured TuneIntents; SemanticMap.Tune validates and applies them via
+// SetPropositionStrength + RecordTune.
+//
+// Guarantees:
+//   - ParseIntent is a pure function: it never modifies the graph.
+//   - ParseIntent returns (empty, nil) for unrecognized or ambiguous text;
+//     it never returns an error on well-formed input.
+//   - Validate is stateless: it checks hard bounds only, not current values.
+//   - Validate returns nil iff every TuneAdjustment.NewStrength is within the
+//     allowed bounds for its proposition. Otherwise it returns a descriptive
+//     error listing every violation.
+type TunerContract interface {
+	ParseIntent(text string) ([]*types.TuneIntent, error)
+	Validate(adjustments []*types.TuneAdjustment) error
 }
 
 // ── Collector ─────────────────────────────────────────────────────────────────
