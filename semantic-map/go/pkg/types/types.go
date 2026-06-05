@@ -34,16 +34,18 @@ type NodeDescriptor struct {
 }
 
 type EdgeDescriptor struct {
-	FromID        string
-	ToID          string
-	PropositionID string
-	Direction     Direction
-	PriorWeight   float64
-	EMAWeight     float64
-	Confidence    float64
-	NObservations int
-	Mu            *float64 // Gaussian mean  (edge-standard profile+); nil if unavailable
-	Sigma         *float64 // Gaussian std   (edge-standard profile+); nil if unavailable
+	FromID           string
+	ToID             string
+	PropositionID    string
+	Direction        Direction
+	PriorWeight      float64
+	EMAWeight        float64
+	Confidence       float64
+	NObservations    int
+	Deprecated       bool   // mirrors Proposition.Deprecated; set by SemanticMap.Deprecate
+	DeprecatedReason string // mirrors Proposition.DeprecatedReason
+	Mu               *float64 // Gaussian mean  (edge-standard profile+); nil if unavailable
+	Sigma            *float64 // Gaussian std   (edge-standard profile+); nil if unavailable
 }
 
 // ── Ontology primitives ───────────────────────────────────────────────────────

@@ -24,11 +24,16 @@
 // CollectorContract.Collect on the profile's collector, and runs each sample
 // through the Bridge → Updater pipe. Setting -collect-interval=0 or
 // -cgroup-root="" disables it (the manual POST /ingest path still works).
+//
+// -regime (stable|default|bursty|volatile) sets alpha and convergence to a
+// pre-characterised bundle matching the deployment's dynamics. Overrides any
+// explicit -alpha and -convergence values when set.
 package main
 
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -72,9 +77,15 @@ func main() {
 			"(e.g. http://node_1:8080,http://node_2:8080). RecommendPeer ranks "+
 			"these by trust-weighted savings. Additional peers can be added at "+
 			"runtime via POST /peers.")
+	regime          := flag.String("regime", "",
+		"dynamics preset (stable|default|bursty|volatile); overrides -alpha and -convergence when set")
 	var useProposer bool
 	flag.BoolVar(&useProposer, "proposer", true, "enable MI correlation proposer (disable for low-CPU devices)")
 	flag.Parse()
+
+	if err := applyRegime(*regime, alpha, convergence); err != nil {
+		log.Fatalf("invalid -regime %q: %v", *regime, err)
+	}
 
 	if *nodeID == "" {
 		if h, err := os.Hostname(); err == nil {
@@ -132,6 +143,44 @@ func main() {
 	<-quit
 	log.Println("shutting down")
 	cancel()
+}
+
+// regimePreset bundles the alpha and convergence values for a named dynamics regime.
+type regimePreset struct {
+	alpha       float64
+	convergence float64
+}
+
+// regimes maps regime names to their pre-characterised parameter bundles.
+// Values are calibrated against the k0s idle and cp_heavy_12client convergence
+// experiments (see mega-research/convergence/NOTES.md):
+//
+//	stable   — predictable IoT / idle edge node; slow EMA, conservative trust
+//	default  — general-purpose; the daemon's baseline
+//	bursty   — control-plane heavy / variable load; tracks bursts faster
+//	volatile — rapid workload transitions; evidence dominates quickly
+var regimes = map[string]regimePreset{
+	"stable":   {alpha: 0.05, convergence: 1000},
+	"default":  {alpha: 0.20, convergence: 500},
+	"bursty":   {alpha: 0.30, convergence: 200},
+	"volatile": {alpha: 0.50, convergence: 100},
+}
+
+// applyRegime overwrites *alpha and *convergence with the preset values for the
+// named regime. It is a no-op when regime is empty (explicit flags win).
+// Returns an error for unrecognised regime names so the caller can log.Fatalf.
+func applyRegime(regime string, alpha, convergence *float64) error {
+	if regime == "" {
+		return nil
+	}
+	p, ok := regimes[regime]
+	if !ok {
+		return fmt.Errorf("unknown regime %q; valid values: stable, default, bursty, volatile", regime)
+	}
+	*alpha = p.alpha
+	*convergence = p.convergence
+	log.Printf("regime=%s → alpha=%.2f convergence=%.0f", regime, p.alpha, p.convergence)
+	return nil
 }
 
 // parsePeerURLs splits the --peers comma-separated value into a clean slice.

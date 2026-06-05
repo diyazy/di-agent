@@ -126,16 +126,18 @@ type PropositionDTO struct {
 // EdgeDTO mirrors types.EdgeDescriptor. Direction is rendered as "+"/"-";
 // Mu and Sigma encode as null when the Gaussian descriptor is unavailable.
 type EdgeDTO struct {
-	FromID        string   `json:"from"`
-	ToID          string   `json:"to"`
-	PropositionID string   `json:"proposition_id"`
-	Direction     string   `json:"direction"`
-	PriorWeight   float64  `json:"prior_weight"`
-	EMAWeight     float64  `json:"ema_weight"`
-	Confidence    float64  `json:"confidence"`
-	NObservations int      `json:"n_observations"`
-	Mu            *float64 `json:"mu"`
-	Sigma         *float64 `json:"sigma"`
+	FromID           string   `json:"from"`
+	ToID             string   `json:"to"`
+	PropositionID    string   `json:"proposition_id"`
+	Direction        string   `json:"direction"`
+	PriorWeight      float64  `json:"prior_weight"`
+	EMAWeight        float64  `json:"ema_weight"`
+	Confidence       float64  `json:"confidence"`
+	NObservations    int      `json:"n_observations"`
+	Deprecated       bool     `json:"deprecated"`
+	DeprecatedReason string   `json:"deprecated_reason,omitempty"`
+	Mu               *float64 `json:"mu"`
+	Sigma            *float64 `json:"sigma"`
 }
 
 // OntologyEventDTO mirrors types.OntologyEvent.
@@ -256,16 +258,18 @@ func propositionToDTO(p *types.Proposition) PropositionDTO {
 
 func edgeToDTO(e *types.EdgeDescriptor) EdgeDTO {
 	return EdgeDTO{
-		FromID:        e.FromID,
-		ToID:          e.ToID,
-		PropositionID: e.PropositionID,
-		Direction:     directionToString(e.Direction),
-		PriorWeight:   e.PriorWeight,
-		EMAWeight:     e.EMAWeight,
-		Confidence:    e.Confidence,
-		NObservations: e.NObservations,
-		Mu:            e.Mu,
-		Sigma:         e.Sigma,
+		FromID:           e.FromID,
+		ToID:             e.ToID,
+		PropositionID:    e.PropositionID,
+		Direction:        directionToString(e.Direction),
+		PriorWeight:      e.PriorWeight,
+		EMAWeight:        e.EMAWeight,
+		Confidence:       e.Confidence,
+		NObservations:    e.NObservations,
+		Deprecated:       e.Deprecated,
+		DeprecatedReason: e.DeprecatedReason,
+		Mu:               e.Mu,
+		Sigma:            e.Sigma,
 	}
 }
 

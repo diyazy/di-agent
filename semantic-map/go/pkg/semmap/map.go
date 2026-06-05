@@ -212,8 +212,24 @@ func (m *SemanticMap) SetPropositionStrength(id string, strength float64) error 
 
 // Deprecate marks a proposition as no-longer-endorsed (soft delete).
 // Reasoners must skip deprecated propositions during cost computation.
+// The flag is synced to every matching EdgeDescriptor in storage so that
+// GET /graph reflects the deprecation without a proposition join.
 func (m *SemanticMap) Deprecate(id, reason string) error {
-	return m.ontology.Deprecate(id, reason)
+	if err := m.ontology.Deprecate(id, reason); err != nil {
+		return err
+	}
+	edges, err := m.storage.AllEdges()
+	if err != nil {
+		return nil // ontology already updated; storage sync is best-effort
+	}
+	for _, e := range edges {
+		if e.PropositionID == id {
+			e.Deprecated = true
+			e.DeprecatedReason = reason
+			_ = m.storage.PutEdge(e)
+		}
+	}
+	return nil
 }
 
 // AddConstruct appends a new construct to the ontology.
