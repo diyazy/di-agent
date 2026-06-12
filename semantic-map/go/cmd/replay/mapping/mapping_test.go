@@ -51,23 +51,30 @@ func TestFromRow_Table(t *testing.T) {
 			want: Mapping{MetricType: types.MemoryUtilization, Value: 800.0 / 8192.0, Ok: true},
 		},
 
-		// ── system.net / InOctets → network_rx_bps (kilobits/s -> bytes/s) ──
+		// ── system.net / InOctets → network_rx_bps normalized to [0,1] ──────
+		// Normalized by 1 Gbps = 125,000,000 bytes/s (RPi4 NIC capacity).
+		// 8 kbits/s * 125 = 1000 bytes/s; 1000 / 125,000,000 = 0.000008
 		{
-			name:  "net InOctets 8 kilobits/s -> 1000 bytes/s",
+			name:  "net InOctets 8 kilobits/s -> 0.000008 (normalized to 1 Gbps ref)",
 			ctx:   "system.net", mid: "InOctets", units: "kilobits/s", host: "master", value: 8.0,
-			want: Mapping{MetricType: types.NetworkRxBps, Value: 1000.0, Ok: true},
+			want: Mapping{MetricType: types.NetworkRxBps, Value: 8.0 * 125.0 / 125_000_000.0, Ok: true},
+		},
+		{
+			name:  "net InOctets 1000000 kilobits/s (1 Gbps) -> 1.0 (clamped)",
+			ctx:   "system.net", mid: "InOctets", units: "kilobits/s", host: "master", value: 1_000_000.0,
+			want: Mapping{MetricType: types.NetworkRxBps, Value: 1.0, Ok: true},
 		},
 
 		// ── system.net / OutOctets → network_tx_bps (signed, abs first) ──
 		{
-			name:  "net OutOctets -8 kilobits/s -> 1000 bytes/s (abs)",
+			name:  "net OutOctets -8 kilobits/s -> 0.000008 (abs, normalized)",
 			ctx:   "system.net", mid: "OutOctets", units: "kilobits/s", host: "master", value: -8.0,
-			want: Mapping{MetricType: types.NetworkTxBps, Value: 1000.0, Ok: true},
+			want: Mapping{MetricType: types.NetworkTxBps, Value: 8.0 * 125.0 / 125_000_000.0, Ok: true},
 		},
 		{
-			name:  "net OutOctets 16 kilobits/s positive -> 2000 bytes/s",
+			name:  "net OutOctets 16 kilobits/s positive -> 0.000016 (normalized)",
 			ctx:   "system.net", mid: "OutOctets", units: "kilobits/s", host: "master", value: 16.0,
-			want: Mapping{MetricType: types.NetworkTxBps, Value: 2000.0, Ok: true},
+			want: Mapping{MetricType: types.NetworkTxBps, Value: 16.0 * 125.0 / 125_000_000.0, Ok: true},
 		},
 
 		// ── Negative cases — should return {Ok: false} ────────────────────

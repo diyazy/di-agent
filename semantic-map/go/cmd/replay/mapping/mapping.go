@@ -111,25 +111,33 @@ func FromRow(chartContext, metricID, units, hostname string, value float64) Mapp
 		return Mapping{MetricType: types.MemoryUtilization, Value: util, Ok: true}
 
 	case chartContext == "system.net" && metricID == "InOctets" && units == "kilobits/s":
-		// Netdata reports kilobits/s; wire unit is bytes/s. Convert:
-		// kilobits/s * 1000 / 8 = bytes/s, i.e. *125. Inbound traffic is
-		// always non-negative on a healthy NIC.
-		v := value * 125.0
+		// Netdata reports kilobits/s; convert to bytes/s (*125), then
+		// normalize to [0,1] using 1 Gbps (RPi4 NIC capacity) as the
+		// reference. Without normalization the EMA grows to tens of thousands,
+		// which inverts latency cost in the Reasoner via negative-direction
+		// edges (P13: CO→PS direction=−).
+		const refBps = 125_000_000.0 // 1 Gbps in bytes/s
+		v := value * 125.0 / refBps
 		if v < 0 {
 			v = 0
+		}
+		if v > 1 {
+			v = 1
 		}
 		return Mapping{MetricType: types.NetworkRxBps, Value: v, Ok: true}
 
 	case chartContext == "system.net" && metricID == "OutOctets" && units == "kilobits/s":
-		// Outbound is reported as a signed-negative value in Netdata's
-		// system.net chart (the convention is to render rx/tx on a single
-		// chart with mirrored y-axes). Magnitude is what we want for
-		// the rate metric.
+		// Outbound is reported signed-negative in Netdata's system.net chart.
+		// Take the magnitude, convert, and normalize by the same 1 Gbps ref.
+		const refBps = 125_000_000.0
 		v := value
 		if v < 0 {
 			v = -v
 		}
-		v *= 125.0
+		v = v * 125.0 / refBps
+		if v > 1 {
+			v = 1
+		}
 		return Mapping{MetricType: types.NetworkTxBps, Value: v, Ok: true}
 	}
 	return Mapping{}
