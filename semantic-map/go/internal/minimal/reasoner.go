@@ -116,7 +116,14 @@ func (r *RuleEngineReasoner) CostOfAction(taskType, nodeID string) (*types.Actio
 
 		switch e.ToID {
 		case "RC":
-			energyCost += effective * sign(e.Direction)
+			// Prior-relative cost: deviation from Di-Select prior, scaled by
+			// direction. Positive edge drifting above prior = more overhead than
+			// expected. Negative edge drifting below prior = less efficiency than
+			// expected. Both inflate cost; matching-prior observations contribute 0.
+			// Raw effective * sign cancels when all RC-adjacent edges converge to
+			// the same observation (they receive the same metric via the Bridge),
+			// so deviation is the only stable discriminator between agents.
+			energyCost += (effective - e.PriorWeight) * sign(e.Direction)
 		case "PS":
 			latency += effective * sign(e.Direction)
 		}
