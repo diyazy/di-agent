@@ -421,7 +421,7 @@ func TestEvolution_ConflictPairCoupling(t *testing.T) {
 		t.Errorf("graph path should include both P2 and P3; foundP2=%v foundP3=%v", foundP2, foundP3)
 	}
 	t.Logf("  Reasoner aggregates both contributions:")
-	t.Logf("    latency=%.3f  energy=%.3f  confidence=%.3f", cost.LatencyEstimate, cost.EnergyCost, cost.Confidence)
+	t.Logf("    latency=%.3f  resource_cost=%.3f  confidence=%.3f", cost.LatencyEstimate, cost.ResourceCost, cost.Confidence)
 	t.Logf("    graph path includes P2 and P3: %v / %v", foundP2, foundP3)
 
 	printSummary(t, "conflict-pair", a.storage, a.ontology)
@@ -511,8 +511,8 @@ func TestEvolution_DeprecationFromContradiction(t *testing.T) {
 	t.Log("")
 
 	before, _ := a.sm.CostOfAction("pod-scheduling", "node_1")
-	t.Logf("  before: graph path length = %d, latency=%.3f, energy=%.3f, confidence=%.3f",
-		len(before.GraphPathUsed), before.LatencyEstimate, before.EnergyCost, before.Confidence)
+	t.Logf("  before: graph path length = %d, latency=%.3f, resource_cost=%.3f, confidence=%.3f",
+		len(before.GraphPathUsed), before.LatencyEstimate, before.ResourceCost, before.Confidence)
 
 	advisoryAt := -1
 	for tick := 0; tick < 200; tick++ {
@@ -538,8 +538,8 @@ func TestEvolution_DeprecationFromContradiction(t *testing.T) {
 	t.Log("  Operator deprecates P5.")
 
 	after, _ := a.sm.CostOfAction("pod-scheduling", "node_1")
-	t.Logf("  after:  graph path length = %d, latency=%.3f, energy=%.3f, confidence=%.3f",
-		len(after.GraphPathUsed), after.LatencyEstimate, after.EnergyCost, after.Confidence)
+	t.Logf("  after:  graph path length = %d, latency=%.3f, resource_cost=%.3f, confidence=%.3f",
+		len(after.GraphPathUsed), after.LatencyEstimate, after.ResourceCost, after.Confidence)
 
 	// Invariants.
 	if len(after.GraphPathUsed) != len(before.GraphPathUsed)-1 {

@@ -687,7 +687,7 @@ func peerToDTO(d *peers.Descriptor) PeerDTO {
 // against the requested budgets:
 //
 //   - If LatencyBudgetMs > 0 and the local LatencyEstimate exceeds it → reject.
-//   - If EnergyBudgetJoules is set and the local EnergyCost exceeds it → reject.
+//   - If EnergyBudgetJoules is set and the local ResourceCost exceeds it → reject.
 //   - Otherwise → accept.
 //
 // The decision is informational only — we do not schedule anything. Execution
@@ -703,24 +703,24 @@ func decideOffload(sm *semmap.SemanticMap, req *OffloadHTTPRequest) OffloadHTTPR
 	}
 	if req.LatencyBudgetMs > 0 && cost.LatencyEstimate > req.LatencyBudgetMs {
 		return OffloadHTTPResponse{
-			Accepted:        false,
-			Reason:          fmt.Sprintf("latency %.2fms exceeds budget %.2fms", cost.LatencyEstimate, req.LatencyBudgetMs),
-			ExpectedLatency: cost.LatencyEstimate,
-			ExpectedEnergy:  cost.EnergyCost,
+			Accepted:             false,
+			Reason:               fmt.Sprintf("latency %.2fms exceeds budget %.2fms", cost.LatencyEstimate, req.LatencyBudgetMs),
+			ExpectedLatency:      cost.LatencyEstimate,
+			ExpectedResourceCost: cost.ResourceCost,
 		}
 	}
-	if req.EnergyBudgetJoules != nil && cost.EnergyCost > *req.EnergyBudgetJoules {
+	if req.EnergyBudgetJoules != nil && cost.ResourceCost > *req.EnergyBudgetJoules {
 		return OffloadHTTPResponse{
-			Accepted:        false,
-			Reason:          fmt.Sprintf("energy %.3fJ exceeds budget %.3fJ", cost.EnergyCost, *req.EnergyBudgetJoules),
-			ExpectedLatency: cost.LatencyEstimate,
-			ExpectedEnergy:  cost.EnergyCost,
+			Accepted:             false,
+			Reason:               fmt.Sprintf("resource cost %.3f exceeds energy budget %.3fJ", cost.ResourceCost, *req.EnergyBudgetJoules),
+			ExpectedLatency:      cost.LatencyEstimate,
+			ExpectedResourceCost: cost.ResourceCost,
 		}
 	}
 	return OffloadHTTPResponse{
-		Accepted:        true,
-		Reason:          "within budget",
-		ExpectedLatency: cost.LatencyEstimate,
-		ExpectedEnergy:  cost.EnergyCost,
+		Accepted:             true,
+		Reason:               "within budget",
+		ExpectedLatency:      cost.LatencyEstimate,
+		ExpectedResourceCost: cost.ResourceCost,
 	}
 }

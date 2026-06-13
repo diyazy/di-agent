@@ -143,13 +143,14 @@ type SimulateRequest struct {
 
 // OutcomeSimulation is the response of POST /simulate.
 type OutcomeSimulation struct {
-	ExpectedLatency float64  `json:"ExpectedLatency"`
-	ExpectedEnergy  float64  `json:"ExpectedEnergy"`
-	Confidence      float64  `json:"Confidence"`
-	GraphPathUsed   []string `json:"GraphPathUsed"`
-	P95Latency      *float64 `json:"P95Latency"`
-	P95Energy       *float64 `json:"P95Energy"`
-	RiskFlags       []string `json:"RiskFlags"`
+	ExpectedLatency      float64  `json:"ExpectedLatency"`
+	ExpectedResourceCost float64  `json:"ExpectedResourceCost"`
+	ExpectedEnergy       float64  `json:"ExpectedEnergy"` // placeholder: zero until EnergyJoules observations are available
+	Confidence           float64  `json:"Confidence"`
+	GraphPathUsed        []string `json:"GraphPathUsed"`
+	P95Latency           *float64 `json:"P95Latency"`
+	P95ResourceCost      *float64 `json:"P95ResourceCost"`
+	RiskFlags            []string `json:"RiskFlags"`
 }
 
 // CandidateEdge mirrors types.CandidateEdge for the GET /candidates response.

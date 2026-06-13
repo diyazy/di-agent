@@ -205,10 +205,11 @@ type OffloadHTTPRequest struct {
 
 // OffloadHTTPResponse is the body of POST /offload — the peer's decision.
 type OffloadHTTPResponse struct {
-	Accepted        bool    `json:"accepted"`
-	Reason          string  `json:"reason,omitempty"`
-	ExpectedLatency float64 `json:"expected_latency"`
-	ExpectedEnergy  float64 `json:"expected_energy"`
+	Accepted             bool    `json:"accepted"`
+	Reason               string  `json:"reason,omitempty"`
+	ExpectedLatency      float64 `json:"expected_latency"`
+	ExpectedResourceCost float64 `json:"expected_resource_cost"`
+	ExpectedEnergy       float64 `json:"expected_energy"` // placeholder: zero until EnergyJoules observations are available
 }
 
 // ── Mappers ───────────────────────────────────────────────────────────────────

@@ -769,7 +769,7 @@ func TestOffload_AcceptWithinBudget(t *testing.T) {
 	}
 }
 
-// drivePositiveCost biases EMAs so that both EnergyCost (sum over edges
+// drivePositiveCost biases EMAs so that both ResourceCost (sum over edges
 // into RC) and LatencyEstimate (sum over edges into PS) come out > 0.
 //
 // Without biasing, the bootstrap propositions sum to ≤0 (positives cancel
@@ -872,10 +872,10 @@ func TestOffload_RejectExceedsEnergyBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cost.EnergyCost <= 0 {
-		t.Fatalf("test precondition: energy=%.3f must be > 0 after biasing", cost.EnergyCost)
+	if cost.ResourceCost <= 0 {
+		t.Fatalf("test precondition: resource cost=%.3f must be > 0 after biasing", cost.ResourceCost)
 	}
-	tight := cost.EnergyCost / 10
+	tight := cost.ResourceCost / 10
 	resp := postJSON(t, base+"/offload", OffloadHTTPRequest{
 		TaskType:           "pod-scheduling",
 		SourceNodeID:       "node_self",

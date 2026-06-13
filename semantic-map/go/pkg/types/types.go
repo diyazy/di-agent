@@ -94,7 +94,8 @@ type OffloadContext struct {
 
 type ActionCost struct {
 	CPUCost         float64
-	EnergyCost      float64
+	ResourceCost    float64 // resource overhead derived from CPU/memory observations
+	EnergyCost      float64 // placeholder: zero until EnergyJoules observations are available
 	LatencyEstimate float64
 	Confidence      float64
 	Rationale       string   // must reference specific node/edge IDs
@@ -109,13 +110,14 @@ type PeerRecommendation struct {
 }
 
 type OutcomeSimulation struct {
-	ExpectedLatency float64
-	ExpectedEnergy  float64
-	Confidence      float64
-	GraphPathUsed   []string
-	P95Latency      *float64 // nil if Gaussian descriptors unavailable
-	P95Energy       *float64
-	RiskFlags       []string
+	ExpectedLatency      float64
+	ExpectedResourceCost float64  // resource overhead derived from CPU/memory observations
+	ExpectedEnergy       float64  // placeholder: zero until EnergyJoules observations are available
+	Confidence           float64
+	GraphPathUsed        []string
+	P95Latency           *float64 // nil if Gaussian descriptors unavailable
+	P95ResourceCost      *float64
+	RiskFlags            []string
 }
 
 // ── Collector types ───────────────────────────────────────────────────────────

@@ -222,7 +222,7 @@ func TestClient_CostSuccessDecodesActionCost(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(ActionCost{
 			CPUCost:         0.1,
-			EnergyCost:      0.42,
+			ResourceCost:    0.42,
 			LatencyEstimate: 12.5,
 			Confidence:      0.7,
 			Rationale:       "peer rationale",
@@ -236,8 +236,8 @@ func TestClient_CostSuccessDecodesActionCost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cost.EnergyCost != 0.42 {
-		t.Errorf("EnergyCost: got %.3f, want 0.42", cost.EnergyCost)
+	if cost.ResourceCost != 0.42 {
+		t.Errorf("ResourceCost: got %.3f, want 0.42", cost.ResourceCost)
 	}
 	if len(cost.GraphPathUsed) != 1 {
 		t.Errorf("GraphPathUsed len: got %d, want 1", len(cost.GraphPathUsed))
@@ -303,10 +303,10 @@ func TestClient_OffloadAcceptResponse(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(OffloadResponse{
-			Accepted:        true,
-			Reason:          "ok",
-			ExpectedLatency: 9.0,
-			ExpectedEnergy:  0.3,
+			Accepted:             true,
+			Reason:               "ok",
+			ExpectedLatency:      9.0,
+			ExpectedResourceCost: 0.3,
 		})
 	}))
 	defer srv.Close()

@@ -42,16 +42,16 @@ func newSimulateCmd(deps *Deps) *cobra.Command {
 			if deps.JSON {
 				return render.JSON(cmd.OutOrStdout(), out)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Target:           %s\n", target)
-			fmt.Fprintf(cmd.OutOrStdout(), "ExpectedLatency:  %.3f ms\n", out.ExpectedLatency)
-			fmt.Fprintf(cmd.OutOrStdout(), "ExpectedEnergy:   %.3f J\n", out.ExpectedEnergy)
-			fmt.Fprintf(cmd.OutOrStdout(), "Confidence:       %.2f\n", out.Confidence)
-			fmt.Fprintf(cmd.OutOrStdout(), "GraphPath:        %s\n", strings.Join(out.GraphPathUsed, " -> "))
+			fmt.Fprintf(cmd.OutOrStdout(), "Target:                %s\n", target)
+			fmt.Fprintf(cmd.OutOrStdout(), "ExpectedLatency:       %.3f ms\n", out.ExpectedLatency)
+			fmt.Fprintf(cmd.OutOrStdout(), "ExpectedResourceCost:  %.3f\n", out.ExpectedResourceCost)
+			fmt.Fprintf(cmd.OutOrStdout(), "Confidence:            %.2f\n", out.Confidence)
+			fmt.Fprintf(cmd.OutOrStdout(), "GraphPath:             %s\n", strings.Join(out.GraphPathUsed, " -> "))
 			if out.P95Latency != nil {
-				fmt.Fprintf(cmd.OutOrStdout(), "P95Latency:       %.3f ms\n", *out.P95Latency)
+				fmt.Fprintf(cmd.OutOrStdout(), "P95Latency:            %.3f ms\n", *out.P95Latency)
 			}
-			if out.P95Energy != nil {
-				fmt.Fprintf(cmd.OutOrStdout(), "P95Energy:        %.3f J\n", *out.P95Energy)
+			if out.P95ResourceCost != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "P95ResourceCost:       %.3f\n", *out.P95ResourceCost)
 			}
 			if len(out.RiskFlags) > 0 {
 				fmt.Fprintf(cmd.OutOrStdout(), "RiskFlags:        %s\n", strings.Join(out.RiskFlags, ","))

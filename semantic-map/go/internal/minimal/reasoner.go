@@ -99,7 +99,7 @@ func (r *RuleEngineReasoner) CostOfAction(taskType, nodeID string) (*types.Actio
 		return nil, err
 	}
 
-	var cpuCost, energyCost, latency float64
+	var cpuCost, resourceCost, latency float64
 	var confidenceSum float64
 	var counted int
 	var path []string
@@ -123,7 +123,7 @@ func (r *RuleEngineReasoner) CostOfAction(taskType, nodeID string) (*types.Actio
 			// Raw effective * sign cancels when all RC-adjacent edges converge to
 			// the same observation (they receive the same metric via the Bridge),
 			// so deviation is the only stable discriminator between agents.
-			energyCost += (effective - e.PriorWeight) * sign(e.Direction)
+			resourceCost += (effective - e.PriorWeight) * sign(e.Direction)
 		case "PS":
 			latency += effective * sign(e.Direction)
 		}
@@ -137,7 +137,8 @@ func (r *RuleEngineReasoner) CostOfAction(taskType, nodeID string) (*types.Actio
 
 	return &types.ActionCost{
 		CPUCost:         math.Max(0, cpuCost),
-		EnergyCost:      math.Max(0, energyCost),
+		ResourceCost:    math.Max(0, resourceCost),
+		EnergyCost:      0,
 		LatencyEstimate: math.Max(0, latency),
 		Confidence:      confidence,
 		Rationale:       fmt.Sprintf("task=%s node=%s path=[%s]", taskType, nodeID, strings.Join(path, ", ")),
@@ -244,7 +245,7 @@ func (r *RuleEngineReasoner) RecommendPeer(octx *types.OffloadContext) (*types.P
 		if perr := r.peers.MarkSeen(p.ID, time.Now()); perr != nil {
 			log.Printf("reasoner.RecommendPeer: MarkSeen failed: %v", perr)
 		}
-		savings := myCost.EnergyCost - peerCost.EnergyCost
+		savings := myCost.ResourceCost - peerCost.ResourceCost
 		weighted := savings * p.Trust
 		if savings <= 0 {
 			skippedNoSavings++
@@ -257,17 +258,17 @@ func (r *RuleEngineReasoner) RecommendPeer(octx *types.OffloadContext) (*types.P
 	}
 
 	if !bestSet {
-		return nil, fmt.Errorf("%w: %d peers below trust floor, %d http errors, %d had no savings (myEnergy=%.3f)",
+		return nil, fmt.Errorf("%w: %d peers below trust floor, %d http errors, %d had no savings (myResourceCost=%.3f)",
 			contracts.ErrInsufficientTrust,
-			skippedBelowTrust, skippedHTTPError, skippedNoSavings, myCost.EnergyCost)
+			skippedBelowTrust, skippedHTTPError, skippedNoSavings, myCost.ResourceCost)
 	}
 
 	return &types.PeerRecommendation{
 		PeerID:          best.peer.ID,
 		ExpectedSavings: best.savings,
 		Rationale: fmt.Sprintf(
-			"peer=%s (url=%s trust=%.2f) saves %.3f energy vs local (%.3f); trust-weighted=%.3f; peer path=[%s]",
-			best.peer.ID, best.peer.URL, best.peer.Trust, best.savings, myCost.EnergyCost, best.weighted,
+			"peer=%s (url=%s trust=%.2f) saves %.3f resource cost vs local (%.3f); trust-weighted=%.3f; peer path=[%s]",
+			best.peer.ID, best.peer.URL, best.peer.Trust, best.savings, myCost.ResourceCost, best.weighted,
 			strings.Join(best.path, ", "),
 		),
 		GraphPathUsed: best.path,
@@ -284,16 +285,16 @@ func (r *RuleEngineReasoner) SimulateOutcome(octx *types.OffloadContext, targetN
 	if octx.LatencyBudgetMs > 0 && cost.LatencyEstimate > octx.LatencyBudgetMs {
 		riskFlags = append(riskFlags, fmt.Sprintf("latency %.1fms exceeds budget %.1fms", cost.LatencyEstimate, octx.LatencyBudgetMs))
 	}
-	if octx.EnergyBudgetJoules != nil && cost.EnergyCost > *octx.EnergyBudgetJoules {
-		riskFlags = append(riskFlags, fmt.Sprintf("energy %.3fJ exceeds budget %.3fJ", cost.EnergyCost, *octx.EnergyBudgetJoules))
+	if octx.EnergyBudgetJoules != nil && cost.ResourceCost > *octx.EnergyBudgetJoules {
+		riskFlags = append(riskFlags, fmt.Sprintf("resource cost %.3f exceeds energy budget %.3fJ", cost.ResourceCost, *octx.EnergyBudgetJoules))
 	}
 
 	return &types.OutcomeSimulation{
-		ExpectedLatency: cost.LatencyEstimate,
-		ExpectedEnergy:  cost.EnergyCost,
-		Confidence:      cost.Confidence,
-		GraphPathUsed:   cost.GraphPathUsed,
-		RiskFlags:       riskFlags,
+		ExpectedLatency:      cost.LatencyEstimate,
+		ExpectedResourceCost: cost.ResourceCost,
+		Confidence:           cost.Confidence,
+		GraphPathUsed:        cost.GraphPathUsed,
+		RiskFlags:            riskFlags,
 		// P95 estimates require Gaussian descriptors (edge-standard+); nil here.
 	}, nil
 }

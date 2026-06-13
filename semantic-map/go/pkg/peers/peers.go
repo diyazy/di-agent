@@ -240,7 +240,8 @@ func NewClient(timeout time.Duration) *Client {
 // format, not the server internals.
 type ActionCost struct {
 	CPUCost         float64  `json:"CPUCost"`
-	EnergyCost      float64  `json:"EnergyCost"`
+	ResourceCost    float64  `json:"ResourceCost"`
+	EnergyCost      float64  `json:"EnergyCost"` // placeholder: zero until EnergyJoules observations are available
 	LatencyEstimate float64  `json:"LatencyEstimate"`
 	Confidence      float64  `json:"Confidence"`
 	Rationale       string   `json:"Rationale"`
@@ -258,13 +259,14 @@ type OffloadRequest struct {
 
 // OffloadResponse is the body returned by a peer's /offload endpoint.
 // Accepted indicates the peer believes it can execute within the requested
-// budgets. ExpectedLatency / ExpectedEnergy report the peer's own cost
+// budgets. ExpectedLatency / ExpectedResourceCost report the peer's own cost
 // estimate so the source agent can record the outcome (and adjust trust).
 type OffloadResponse struct {
-	Accepted        bool    `json:"accepted"`
-	Reason          string  `json:"reason,omitempty"`
-	ExpectedLatency float64 `json:"expected_latency"`
-	ExpectedEnergy  float64 `json:"expected_energy"`
+	Accepted             bool    `json:"accepted"`
+	Reason               string  `json:"reason,omitempty"`
+	ExpectedLatency      float64 `json:"expected_latency"`
+	ExpectedResourceCost float64 `json:"expected_resource_cost"`
+	ExpectedEnergy       float64 `json:"expected_energy"` // placeholder: zero until EnergyJoules observations are available
 }
 
 // Cost asks the peer at peerURL what it would cost to run taskType for

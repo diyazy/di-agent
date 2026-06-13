@@ -148,7 +148,7 @@ func TestScenario_ColdStart(t *testing.T) {
 	t.Logf("T=0 (cold start)")
 	t.Logf("  edges seeded: %d", len(edges))
 	t.Logf("  aggregate confidence: %.3f", cost.Confidence)
-	t.Logf("  decision latency estimate: %.3f  energy: %.3f", cost.LatencyEstimate, cost.EnergyCost)
+	t.Logf("  decision latency estimate: %.3f  resource cost: %.3f", cost.LatencyEstimate, cost.ResourceCost)
 	t.Logf("  graph path length: %d (all edges contribute via priors)", len(cost.GraphPathUsed))
 }
 
@@ -234,11 +234,11 @@ func TestScenario_PerKDDecisionsDiffer(t *testing.T) {
 	t.Log("Scenario: two agents, same query, different -kd. Decisions should diverge because the per-KD")
 	t.Log("priors land different initial weights on each edge.")
 	t.Log("")
-	t.Logf("  k3s  →  latency=%.3f  energy=%.3f  confidence=%.3f", costK3s.LatencyEstimate, costK3s.EnergyCost, costK3s.Confidence)
-	t.Logf("  k0s  →  latency=%.3f  energy=%.3f  confidence=%.3f", costK0s.LatencyEstimate, costK0s.EnergyCost, costK0s.Confidence)
+	t.Logf("  k3s  →  latency=%.3f  resource_cost=%.3f  confidence=%.3f", costK3s.LatencyEstimate, costK3s.ResourceCost, costK3s.Confidence)
+	t.Logf("  k0s  →  latency=%.3f  resource_cost=%.3f  confidence=%.3f", costK0s.LatencyEstimate, costK0s.ResourceCost, costK0s.Confidence)
 
 	if costK3s.LatencyEstimate == costK0s.LatencyEstimate &&
-		costK3s.EnergyCost == costK0s.EnergyCost {
+		costK3s.ResourceCost == costK0s.ResourceCost {
 		t.Errorf("k3s and k0s agents produced identical cost estimates — per-KD seeding is not steering behavior")
 	}
 }
@@ -252,8 +252,8 @@ func TestScenario_DeprecationShrinksGraph(t *testing.T) {
 	t.Log("Scenario: deprecate P1. Reasoner must skip it; storage must retain the EdgeDescriptor.")
 	t.Log("")
 	t.Logf("  before deprecation  graph path length = %d", len(before.GraphPathUsed))
-	t.Logf("                       latency=%.3f  energy=%.3f  confidence=%.3f",
-		before.LatencyEstimate, before.EnergyCost, before.Confidence)
+	t.Logf("                       latency=%.3f  resource_cost=%.3f  confidence=%.3f",
+		before.LatencyEstimate, before.ResourceCost, before.Confidence)
 
 	if err := a.ontology.Deprecate("P1", "scenario test"); err != nil {
 		t.Fatal(err)
@@ -261,8 +261,8 @@ func TestScenario_DeprecationShrinksGraph(t *testing.T) {
 
 	after, _ := a.sm.CostOfAction("pod-scheduling", "node_1")
 	t.Logf("  after deprecation   graph path length = %d", len(after.GraphPathUsed))
-	t.Logf("                       latency=%.3f  energy=%.3f  confidence=%.3f",
-		after.LatencyEstimate, after.EnergyCost, after.Confidence)
+	t.Logf("                       latency=%.3f  resource_cost=%.3f  confidence=%.3f",
+		after.LatencyEstimate, after.ResourceCost, after.Confidence)
 
 	if len(after.GraphPathUsed) != len(before.GraphPathUsed)-1 {
 		t.Errorf("graph path should shrink by exactly 1 after deprecating one proposition; got %d → %d",
@@ -421,7 +421,7 @@ func TestScenario_AuditTrailRecordsEverything(t *testing.T) {
 // Wires three in-process agents (A, B, C), each behind its own httptest
 // server with the minimum HTTP surface RecommendPeer needs (/cost, /healthz,
 // /offload). Each agent is biased so its CostOfAction returns a different
-// EnergyCost: A low (attractive offload target), B high (the agent that
+// ResourceCost: A low (attractive offload target), B high (the agent that
 // wants to offload), C medium. Cross-registers A, B, and C in every other
 // agent's peer registry.
 //
@@ -496,26 +496,26 @@ func registerScenarioHTTP(mux *http.ServeMux, sm *semmap.SemanticMap) {
 			return
 		}
 		resp := peers.OffloadResponse{
-			Accepted:        true,
-			Reason:          "within budget",
-			ExpectedLatency: cost.LatencyEstimate,
-			ExpectedEnergy:  cost.EnergyCost,
+			Accepted:             true,
+			Reason:               "within budget",
+			ExpectedLatency:      cost.LatencyEstimate,
+			ExpectedResourceCost: cost.ResourceCost,
 		}
 		if req.LatencyBudgetMs > 0 && cost.LatencyEstimate > req.LatencyBudgetMs {
 			resp.Accepted = false
 			resp.Reason = fmt.Sprintf("latency %.2f > budget %.2f", cost.LatencyEstimate, req.LatencyBudgetMs)
-		} else if req.EnergyBudgetJoules != nil && cost.EnergyCost > *req.EnergyBudgetJoules {
+		} else if req.EnergyBudgetJoules != nil && cost.ResourceCost > *req.EnergyBudgetJoules {
 			resp.Accepted = false
-			resp.Reason = fmt.Sprintf("energy %.2f > budget %.2f", cost.EnergyCost, *req.EnergyBudgetJoules)
+			resp.Reason = fmt.Sprintf("resource cost %.2f > energy budget %.2f", cost.ResourceCost, *req.EnergyBudgetJoules)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		writeJSONBody(w, resp)
 	})
 }
 
-// biasEnergyTo drives the agent's CostOfAction EnergyCost toward a chosen
+// biasEnergyTo drives the agent's CostOfAction ResourceCost toward a chosen
 // level by ingesting the same constant on each of the three edges that feed
-// into RC (the reasoner's energy aggregator). Drives the EMA close enough to
+// into RC (the reasoner's resource-cost aggregator). Drives the EMA close enough to
 // the target that conf×ema dominates the (1-conf)×prior term — 200 ticks at
 // alpha=0.5 / convergence=100 saturates confidence at 1.0.
 //
@@ -608,16 +608,16 @@ func TestScenario_CoordinationOffload(t *testing.T) {
 	costC, _ := c.sm.CostOfAction("pod-scheduling", "node_self")
 
 	t.Log("Pre-flight self-costs (pod-scheduling):")
-	t.Logf("  A:  energy=%.3f  latency=%.3f  conf=%.3f", costA.EnergyCost, costA.LatencyEstimate, costA.Confidence)
-	t.Logf("  B:  energy=%.3f  latency=%.3f  conf=%.3f", costB.EnergyCost, costB.LatencyEstimate, costB.Confidence)
-	t.Logf("  C:  energy=%.3f  latency=%.3f  conf=%.3f", costC.EnergyCost, costC.LatencyEstimate, costC.Confidence)
+	t.Logf("  A:  resource_cost=%.3f  latency=%.3f  conf=%.3f", costA.ResourceCost, costA.LatencyEstimate, costA.Confidence)
+	t.Logf("  B:  resource_cost=%.3f  latency=%.3f  conf=%.3f", costB.ResourceCost, costB.LatencyEstimate, costB.Confidence)
+	t.Logf("  C:  resource_cost=%.3f  latency=%.3f  conf=%.3f", costC.ResourceCost, costC.LatencyEstimate, costC.Confidence)
 	t.Log("")
 
 	// Mandatory ordering for the recommendation to land on A:
-	// energy(A) < energy(C) < energy(B).
-	if !(costA.EnergyCost < costC.EnergyCost && costC.EnergyCost < costB.EnergyCost) {
+	// resource_cost(A) < resource_cost(C) < resource_cost(B).
+	if !(costA.ResourceCost < costC.ResourceCost && costC.ResourceCost < costB.ResourceCost) {
 		t.Fatalf("scenario precondition failed: need A<C<B, got A=%.3f C=%.3f B=%.3f",
-			costA.EnergyCost, costC.EnergyCost, costB.EnergyCost)
+			costA.ResourceCost, costC.ResourceCost, costB.ResourceCost)
 	}
 
 	// ── Phase 1: B asks the reasoner for the best peer to offload to ───────────
@@ -660,8 +660,8 @@ func TestScenario_CoordinationOffload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Offload call: %v", err)
 	}
-	t.Logf("  → A.Accepted=%t reason=%q expected_latency=%.3f expected_energy=%.3f",
-		resp.Accepted, resp.Reason, resp.ExpectedLatency, resp.ExpectedEnergy)
+	t.Logf("  → A.Accepted=%t reason=%q expected_latency=%.3f expected_resource_cost=%.3f",
+		resp.Accepted, resp.Reason, resp.ExpectedLatency, resp.ExpectedResourceCost)
 	if !resp.Accepted {
 		t.Fatalf("expected A to accept; got rejection reason=%q", resp.Reason)
 	}
@@ -685,9 +685,9 @@ func TestScenario_CoordinationOffload(t *testing.T) {
 	t.Log("  ┌──────┬──────────────┬──────────────────────────────────────────┐")
 	t.Log("  │ Node │ Self-energy  │ Role in this scenario                    │")
 	t.Log("  ├──────┼──────────────┼──────────────────────────────────────────┤")
-	t.Logf("  │  A   │   %.3f      │ idle — accepted offload from B           │", costA.EnergyCost)
-	t.Logf("  │  B   │   %.3f      │ loaded — chose A; trust(A) +%.2f         │", costB.EnergyCost, acceptDelta)
-	t.Logf("  │  C   │   %.3f      │ medium — eligible but not picked         │", costC.EnergyCost)
+	t.Logf("  │  A   │   %.3f      │ idle — accepted offload from B           │", costA.ResourceCost)
+	t.Logf("  │  B   │   %.3f      │ loaded — chose A; trust(A) +%.2f         │", costB.ResourceCost, acceptDelta)
+	t.Logf("  │  C   │   %.3f      │ medium — eligible but not picked         │", costC.ResourceCost)
 	t.Log("  └──────┴──────────────┴──────────────────────────────────────────┘")
 	t.Log("")
 	t.Logf("B's peer table (post-offload):")
@@ -902,8 +902,8 @@ func TestEvolution_OperatorTuneAndAuditTrail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("cost before tune: energy=%.4f; cost after: energy=%.4f",
-		costBefore.EnergyCost, costAfter.EnergyCost)
+	t.Logf("cost before tune: resource_cost=%.4f; cost after: resource_cost=%.4f",
+		costBefore.ResourceCost, costAfter.ResourceCost)
 }
 
 // findPriorWeightsFileForScenarios walks up to locate prior_weights.json so

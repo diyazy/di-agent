@@ -80,8 +80,8 @@ func RunReasonerCompliance(t *testing.T, factory ReasonerFactory) {
 		if cost.CPUCost < 0 {
 			t.Errorf("CPUCost must be ≥ 0; got %.4f", cost.CPUCost)
 		}
-		if cost.EnergyCost < 0 {
-			t.Errorf("EnergyCost must be ≥ 0; got %.4f", cost.EnergyCost)
+		if cost.ResourceCost < 0 {
+			t.Errorf("ResourceCost must be ≥ 0; got %.4f", cost.ResourceCost)
 		}
 		if cost.LatencyEstimate < 0 {
 			t.Errorf("LatencyEstimate must be ≥ 0; got %.4f", cost.LatencyEstimate)
@@ -121,9 +121,9 @@ func RunReasonerCompliance(t *testing.T, factory ReasonerFactory) {
 			t.Errorf("SimulateOutcome must be pure: ExpectedLatency drifted %.4f → %.4f",
 				first.ExpectedLatency, second.ExpectedLatency)
 		}
-		if first.ExpectedEnergy != second.ExpectedEnergy {
-			t.Errorf("SimulateOutcome must be pure: ExpectedEnergy drifted %.4f → %.4f",
-				first.ExpectedEnergy, second.ExpectedEnergy)
+		if first.ExpectedResourceCost != second.ExpectedResourceCost {
+			t.Errorf("SimulateOutcome must be pure: ExpectedResourceCost drifted %.4f → %.4f",
+				first.ExpectedResourceCost, second.ExpectedResourceCost)
 		}
 	})
 
@@ -142,7 +142,7 @@ func RunReasonerCompliance(t *testing.T, factory ReasonerFactory) {
 			t.Fatal(err)
 		}
 		if before.LatencyEstimate != after.LatencyEstimate ||
-			before.EnergyCost != after.EnergyCost ||
+			before.ResourceCost != after.ResourceCost ||
 			before.Confidence != after.Confidence {
 			t.Errorf("SimulateOutcome leaked state — CostOfAction changed after a simulate call")
 		}
@@ -171,9 +171,9 @@ func RunReasonerCompliance(t *testing.T, factory ReasonerFactory) {
 			t.Errorf("P95Latency %.4f must be ≥ ExpectedLatency %.4f",
 				*sim.P95Latency, sim.ExpectedLatency)
 		}
-		if sim.P95Energy != nil && *sim.P95Energy < sim.ExpectedEnergy {
-			t.Errorf("P95Energy %.4f must be ≥ ExpectedEnergy %.4f",
-				*sim.P95Energy, sim.ExpectedEnergy)
+		if sim.P95ResourceCost != nil && *sim.P95ResourceCost < sim.ExpectedResourceCost {
+			t.Errorf("P95ResourceCost %.4f must be ≥ ExpectedResourceCost %.4f",
+				*sim.P95ResourceCost, sim.ExpectedResourceCost)
 		}
 	})
 }
