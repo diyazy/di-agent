@@ -19,6 +19,7 @@ For design rationale, contract decisions, language strategy, and research connec
 - [4. Compliance Tests](#4-compliance-tests)
 - [5. Prior Initialization](#5-prior-initialization)
 - [6. Coordination](#6-coordination)
+- [7. PoC — Live Multi-VM Demo](#7-poc--live-multi-vm-demo)
 
 ---
 
@@ -620,3 +621,53 @@ The verbose output narrates pre-flight self-costs, the peer query, the rationale
 
 * No auth on `/peers` or `/offload` yet. Intended for localhost / lab-network deployment. Production hardening (mTLS, bearer tokens, signed peer identities) is a P7 concern.
 * `peers.Registry` and `peers.Client` are concrete types in `pkg/peers/`, **not** a seventh contract. The contract surface stays at six (Storage, Ontology, Updater, Reasoner, Proposer, Collector). We promote when a second implementation arrives (e.g. SQLite-backed registry, gossip discovery).
+
+---
+
+## 7. PoC — Live Multi-VM Demo
+
+`poc/` provisions three local VMs (via [Multipass](https://multipass.run/)) and runs the full di-agent stack on each — k0s, Netdata, and di-agent — then demonstrates trust-weighted peer routing under real CPU load. This is the executable proof of the P7 claim.
+
+### Prerequisites
+
+```bash
+brew install --cask multipass   # Apple Silicon macOS
+```
+
+### Topology
+
+| VM | k0s role | di-agent regime | Workload |
+|----|----------|-----------------|---------|
+| `diag-1` | single-node | `bursty` (α=0.30, N=200) | heavy (`stress-ng`) |
+| `diag-2` | single-node | `stable` (α=0.05, N=1000) | light |
+| `diag-3` | single-node | `stable` (α=0.05, N=1000) | idle |
+
+Full peer mesh: each agent registers the other two at trust=0.8.
+
+### Commands
+
+```bash
+# One-time setup (~15 min)
+make -C poc all
+
+# Apply heavy load to diag-1
+make -C poc workload-heavy
+
+# 8-round coordinator demo: cost table → /recommend → trust drain → routing flip
+make -C poc demo
+
+# Snapshot /cost from all three agents
+make -C poc status
+
+# Remove all VMs
+make -C poc teardown
+```
+
+### What the demo shows
+
+1. diag-1 under `stress-ng` → RC-adjacent edge EMA drifts below k0s efficiency priors → `ResourceCost` rises.
+2. `POST /recommend` on diag-1 → diag-2 recommended (lower cost, trust=0.8, highest trust-weighted savings).
+3. Round 4: diag-2 trust set to 0.15 via `POST /peers/diag-2/trust {"value":0.15}` — below min-trust floor 0.5.
+4. Rounds 5–8: recommendation flips to diag-3. Trust-weighted routing confirmed on live VMs.
+
+See [ARCHITECTURE.md §12](ARCHITECTURE.md#12-poc-deployment-poc) for the full design rationale.

@@ -657,3 +657,81 @@ Direction modifiers: "deprioritize / reduce / lower / minimize" negate all delta
 ### SLM back-end (cloud-full)
 
 The `cloud-full` profile will substitute a Phi-3 Mini / Gemma 2B inference call behind the same `TunerContract` interface. The contract, validation, audit trail, and hard bounds are profile-agnostic — swapping the back-end changes no other code.
+
+---
+
+## 12. PoC Deployment (`poc/`)
+
+`poc/` is a self-contained Makefile + shell-script suite that provisions three local VMs, deploys k0s + Netdata + di-agent on each, and runs a coordinator demo. It is the live proof-of-concept for the P7 dissertation claim: *"agents with identical priors diverge under different workload histories and trust-weighted routing self-corrects."*
+
+### VM topology
+
+```
+Host (macOS, Apple Silicon)
+│
+├── diag-1  Ubuntu 22.04 ARM64  k0s single-node  regime=bursty   ← heavy workload
+├── diag-2  Ubuntu 22.04 ARM64  k0s single-node  regime=stable   ← light workload
+└── diag-3  Ubuntu 22.04 ARM64  k0s single-node  regime=stable   ← idle
+```
+
+Each VM: 2 vCPU, 2 GB RAM, 10 GB disk. Provisioned via [Multipass](https://multipass.run/).
+
+Each node runs:
+- **k0s** in `--single` (controller+worker) mode — provides the k8s surface that Netdata's `k8s.cgroup` collector observes.
+- **Netdata** — system metrics at `localhost:19999`.
+- **di-agent** — `edge-minimal` profile, `-netdata-url http://localhost:19999`, `-kd k0s`, polling every 5 s. Runs as a systemd service reading `/etc/di-agent/env` for `NODE_ID` and `REGIME`.
+
+Peer mesh: each agent registers the other two via `POST /peers` (trust=0.8). diag-1 uses this mesh for `/recommend`.
+
+### What the binary sees on each node
+
+The NetdataCollector polls `GET /api/v1/allmetrics` and maps:
+- `system.cpu idle %` → `CPUUtilization` → Bridge → RC-adjacent edges
+- `system.ram used` → `MemoryUtilization` → Bridge → RC-adjacent edges
+- `system.net InOctets` → `NetworkRxBps` → Bridge → CO-adjacent edges
+
+Under `stress-ng --cpu 2 --vm 512M`, diag-1's CPU utilization rises → RC-adjacent edges drift below the k0s efficiency priors → `ResourceCost` climbs above diag-2 and diag-3.
+
+### Coordinator demo
+
+`poc/scripts/coordinator.sh` runs 8 rounds (10 s interval):
+
+1. Query `/cost` on all three agents → print cost table with `ResourceCost` and `Confidence`.
+2. Call `POST /recommend` on diag-1 (highest cost) → print recommended peer and savings.
+3. Round 4: set diag-2's trust to 0.15 on diag-1 via `POST /peers/diag-2/trust {"value":0.15}`. Trust 0.15 < default min-trust 0.5 → diag-2 filtered from the eligible set.
+4. Rounds 5–8: recommendation flips to diag-3 — same cost difference, trust-weighted routing wins.
+
+Expected output (with heavy workload on diag-1):
+
+```
+--- Round 1 ---
+  diag-1 (192.168.x.1):  ResourceCost=0.6700  Confidence=0.540
+  diag-2 (192.168.x.2):  ResourceCost=0.1200  Confidence=0.290
+  diag-3 (192.168.x.3):  ResourceCost=0.0900  Confidence=0.288
+  → diag-1 recommends: diag-2  (savings=0.550)
+
+--- Round 4 ---
+  *** Trust drain event ***
+  Trust drain: diag-2 trust=0.15 (< min-trust 0.5) → expect diag-3 to win next rounds
+
+--- Round 5 ---
+  → diag-1 recommends: diag-3  (savings=0.580)
+```
+
+### Quickstart
+
+```bash
+brew install --cask multipass          # one-time
+make -C poc all                        # provision → k0s → netdata → agent → peers (~15 min)
+make -C poc workload-heavy             # stress diag-1
+make -C poc demo                       # 8-round coordinator loop
+make -C poc status                     # snapshot /cost from all three
+make -C poc teardown                   # delete VMs and purge
+```
+
+### Design constraints
+
+- **linux/arm64 binary**: `04-agent.sh` cross-compiles with `GOOS=linux GOARCH=arm64`. On an Apple Silicon host this is a same-arch cross (darwin → linux, same ISA); no emulation layer.
+- **Independent single-node clusters**: each VM runs k0s `--single`, not a joined multi-node cluster. The PoC tests agent-level routing decisions, not k8s scheduling. Three separate clusters keep provisioning simple and failure-isolated.
+- **No auth**: same v1 stance as the coordination layer — lab network only.
+- **`-proposer=false`**: MI proposer disabled on 2-vCPU VMs to keep CPU headroom for workload and measurement.
