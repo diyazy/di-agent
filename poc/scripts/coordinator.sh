@@ -155,20 +155,20 @@ for round in $(seq 1 "$ROUNDS"); do
         drain_ip="${IPS[$DRAIN_HOST]}"
 
         header "  *** Trust drain event at round $round ***"
-        info "Reducing trust for $DRAIN_TARGET on $DRAIN_HOST by -0.65 ..."
+        # Set absolute trust to 0.15 — below the default min-trust floor of 0.5
+        # so diag-1 stops recommending diag-2 and routes to diag-3 instead.
+        info "Setting trust for $DRAIN_TARGET on $DRAIN_HOST to 0.15 (below min-trust floor) ..."
         drain_resp=$(curl -sf -X POST \
             -H "Content-Type: application/json" \
-            -d '{"delta": -0.65}' \
+            -d '{"value": 0.15}' \
             "http://${drain_ip}:8080/peers/${DRAIN_TARGET}/trust" 2>/dev/null || echo "{}")
-        drain_ok=$(json_get "$drain_resp" "ok")
         drain_err=$(json_get "$drain_resp" "error")
-        if [ -n "$drain_err" ] && [ "$drain_err" != "" ]; then
+        if [ -n "$drain_err" ] && [ "$drain_err" != "null" ] && [ "$drain_err" != "" ]; then
             err "  Trust drain failed: $drain_err"
-            info "  (Endpoint may not exist — trust degradation is advisory for this PoC)"
         else
-            ok "  Trust drain applied: $DRAIN_TARGET trust on $DRAIN_HOST reduced"
+            ok "  Trust drain applied: $DRAIN_TARGET trust set to 0.15 on $DRAIN_HOST"
         fi
-        announce "Trust drain: $DRAIN_TARGET trust reduced → expect ${VMS[2]} to win next round"
+        announce "Trust drain: $DRAIN_TARGET trust=0.15 (< min-trust 0.5) → expect ${VMS[2]} to win next rounds"
         echo ""
         DRAIN_DONE=true
     fi
