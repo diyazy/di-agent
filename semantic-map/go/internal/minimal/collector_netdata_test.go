@@ -19,11 +19,11 @@ func buildNetdataTestServer(t *testing.T) *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Query().Get("chart") {
 		case "system.cpu":
-			fmt.Fprint(w, `{"result":{"labels":["time","user","system","idle"],"data":[[1703123456,2.5,0.5,96.9]]}}`)
+			fmt.Fprint(w, `{"labels":["time","user","system","idle"],"data":[[1703123456,2.5,0.5,96.9]]}`)
 		case "system.ram":
-			fmt.Fprint(w, `{"result":{"labels":["time","free","used","cached","buffers"],"data":[[1703123456,4096.0,2048.0,1024.0,512.0]]}}`)
+			fmt.Fprint(w, `{"labels":["time","free","used","cached","buffers"],"data":[[1703123456,4096.0,2048.0,1024.0,512.0]]}`)
 		case "system.net":
-			fmt.Fprint(w, `{"result":{"labels":["time","InOctets","OutOctets"],"data":[[1703123456,8.0,-6.0]]}}`)
+			fmt.Fprint(w, `{"labels":["time","InOctets","OutOctets"],"data":[[1703123456,8.0,-6.0]]}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -140,17 +140,19 @@ func TestNetdataCollector_Network(t *testing.T) {
 	if rxSample == nil {
 		t.Fatal("no NetworkRxBps sample returned")
 	}
-	// InOctets=8.0 kilobits/s → 8.0 * 125 = 1000 bytes/s
-	if rxSample.Value != 1000.0 {
-		t.Errorf("NetworkRxBps = %.1f; want 1000.0", rxSample.Value)
+	// InOctets=8.0 kilobits/s → 8.0 * 125 / 125_000_000 = 0.000008 (normalized [0,1])
+	wantRx := 8.0 * 125.0 / 125_000_000.0
+	if rxSample.Value != wantRx {
+		t.Errorf("NetworkRxBps = %v; want %v", rxSample.Value, wantRx)
 	}
 
 	if txSample == nil {
 		t.Fatal("no NetworkTxBps sample returned")
 	}
-	// OutOctets=-6.0 kilobits/s → abs(-6.0) * 125 = 750 bytes/s
-	if txSample.Value != 750.0 {
-		t.Errorf("NetworkTxBps = %.1f; want 750.0", txSample.Value)
+	// OutOctets=-6.0 kilobits/s → abs(-6.0) * 125 / 125_000_000 = 0.000006
+	wantTx := 6.0 * 125.0 / 125_000_000.0
+	if txSample.Value != wantTx {
+		t.Errorf("NetworkTxBps = %v; want %v", txSample.Value, wantTx)
 	}
 }
 

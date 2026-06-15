@@ -92,11 +92,17 @@ func (n *NetdataCollector) Collect() ([]*types.MetricSample, error) {
 	}
 
 	// ── system.net ───────────────────────────────────────────────────────────
+	// Netdata reports in kilobits/s. Convert to bytes/s then normalize to [0,1]
+	// against a 1 Gbps reference (125,000,000 bytes/s — RPi4 / VM NIC cap).
+	const refBps = 125_000_000.0
 	if resp, ok := n.fetchChart("system.net"); ok {
 		if inOctets, ts, found := dimValue(resp, "InOctets"); found {
-			rx := inOctets * 125.0
+			rx := inOctets * 125.0 / refBps
 			if rx < 0 {
 				rx = 0
+			}
+			if rx > 1 {
+				rx = 1
 			}
 			out = append(out, n.sample(types.NetworkRxBps, rx, ts))
 		}
@@ -105,7 +111,10 @@ func (n *NetdataCollector) Collect() ([]*types.MetricSample, error) {
 			if tx < 0 {
 				tx = -tx
 			}
-			tx *= 125.0
+			tx = tx * 125.0 / refBps
+			if tx > 1 {
+				tx = 1
+			}
 			out = append(out, n.sample(types.NetworkTxBps, tx, ts))
 		}
 	}
@@ -151,27 +160,27 @@ func (n *NetdataCollector) sample(mt types.MetricType, value float64, ts int64) 
 
 // ── Netdata API response types ────────────────────────────────────────────────
 
+// netdataResponse matches the Netdata HTTP API v1 /data response.
+// Labels and Data are top-level fields — not nested under "result".
 type netdataResponse struct {
-	Result struct {
-		Labels []string    `json:"labels"`
-		Data   [][]float64 `json:"data"`
-	} `json:"result"`
+	Labels []string    `json:"labels"`
+	Data   [][]float64 `json:"data"`
 }
 
 // dimValue extracts the value and Unix timestamp for the named dimension from
 // a Netdata v1 data response. labels[0] is always "time" and is skipped.
 // Returns (value, timestamp, true) on success; (0, 0, false) if not found.
 func dimValue(resp *netdataResponse, name string) (float64, int64, bool) {
-	for i, label := range resp.Result.Labels {
+	for i, label := range resp.Labels {
 		if i == 0 {
 			continue // skip "time"
 		}
 		if label == name {
-			if len(resp.Result.Data) == 0 || i >= len(resp.Result.Data[0]) {
+			if len(resp.Data) == 0 || i >= len(resp.Data[0]) {
 				return 0, 0, false
 			}
-			ts := int64(resp.Result.Data[0][0])
-			return resp.Result.Data[0][i], ts, true
+			ts := int64(resp.Data[0][0])
+			return resp.Data[0][i], ts, true
 		}
 	}
 	return 0, 0, false
