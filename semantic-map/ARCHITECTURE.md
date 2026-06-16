@@ -681,41 +681,51 @@ Each node runs:
 - **Netdata** — system metrics at `localhost:19999`.
 - **di-agent** — `edge-minimal` profile, `-netdata-url http://localhost:19999`, `-kd k0s`, polling every 5 s. Runs as a systemd service reading `/etc/di-agent/env` for `NODE_ID` and `REGIME`.
 
-Peer mesh: each agent registers the other two via `POST /peers` (trust=0.8). diag-1 uses this mesh for `/recommend`.
+Peer mesh: each agent registers the other two via `POST /peers`. The server derives the peer ID as `sha256(url)[:12]` and initialises trust at 0.5; `05-peers.sh` follows each add with `POST /peers/{id}/trust {"value":0.8}` to set the operational trust. diag-1 uses this mesh for `/recommend`.
 
 ### What the binary sees on each node
 
-The NetdataCollector polls `GET /api/v1/allmetrics` and maps:
-- `system.cpu idle %` → `CPUUtilization` → Bridge → RC-adjacent edges
-- `system.ram used` → `MemoryUtilization` → Bridge → RC-adjacent edges
-- `system.net InOctets` → `NetworkRxBps` → Bridge → CO-adjacent edges
+The `NetdataCollector` polls one chart at a time via:
 
-Under `stress-ng --cpu 2 --vm 512M`, diag-1's CPU utilization rises → RC-adjacent edges drift below the k0s efficiency priors → `ResourceCost` climbs above diag-2 and diag-3.
+```
+GET /api/v1/data?chart=CHART&points=1&after=-30&format=json
+```
+
+and maps:
+- `system.cpu idle %` → `CPUUtilization = 1 - idle/100` → RC-adjacent edges
+- `system.ram used/(used+free+cached+buffers)` → `MemoryUtilization` → RC-adjacent edges
+- `system.net InOctets` (kb/s) → `NetworkRxBps` normalized to [0,1] vs 1 Gbps reference
+- `system.net OutOctets` (sign-flipped) → `NetworkTxBps` normalized similarly
+
+At idle k0s, CPU utilization is ≈ 0.05 — well below the Di-Select priors (RC propositions are calibrated to heavier workloads). The bursty regime (α=0.30, N=200) converges faster, so diag-1 accumulates confidence and cost quicker than the stable VMs (α=0.05, N=1000).
+
+**Note on `stress-ng`**: High CPU pushes CPUUtilization above the RC priors. Because P8 (MU→RC, direction −) and P10 (PS→RC, direction −) have negative direction, their contributions subtract from cost when EMA exceeds priors, which can push `ResourceCost` to zero. The coordinator demo works cleanly at idle or light load without `stress-ng`.
 
 ### Coordinator demo
 
-`poc/scripts/coordinator.sh` runs 8 rounds (10 s interval):
+`poc/scripts/coordinator.sh` runs N rounds (default 8, `ROUNDS=` env var, `INTERVAL=` between rounds):
 
-1. Query `/cost` on all three agents → print cost table with `ResourceCost` and `Confidence`.
-2. Call `POST /recommend` on diag-1 (highest cost) → print recommended peer and savings.
-3. Round 4: set diag-2's trust to 0.15 on diag-1 via `POST /peers/diag-2/trust {"value":0.15}`. Trust 0.15 < default min-trust 0.5 → diag-2 filtered from the eligible set.
-4. Rounds 5–8: recommendation flips to diag-3 — same cost difference, trust-weighted routing wins.
+1. Query `/cost?taskType=pod-scheduling&nodeID=master` on all three agents → print cost table.
+2. Call `POST /recommend` on the highest-cost agent → print recommended peer ID and savings. The response uses `PeerID`/`ExpectedSavings`/`Rationale` (PascalCase).
+3. Round `ROUNDS/2`: look up diag-2's real peer ID on diag-1 (via `GET /peers`, match by URL) → `POST /peers/{id}/trust {"value":0.15}`. Trust 0.15 < default min-trust floor 0.5 → diag-2 filtered out.
+4. Subsequent rounds: diag-2 remains excluded; recommendation stays on diag-3 (lowest cost in the eligible set).
 
-Expected output (with heavy workload on diag-1):
+Actual output observed at idle (no artificial workload):
 
 ```
---- Round 1 ---
-  diag-1 (192.168.x.1):  ResourceCost=0.6700  Confidence=0.540
-  diag-2 (192.168.x.2):  ResourceCost=0.1200  Confidence=0.290
-  diag-3 (192.168.x.3):  ResourceCost=0.0900  Confidence=0.288
-  → diag-1 recommends: diag-2  (savings=0.550)
+  VM          IP               ResourceCost    Confidence
+  ----------  ---------------  --------------  ----------
+  diag-1      192.168.252.2    0.035           0.4         ← bursty, converges faster
+  diag-2      192.168.252.3    0.026           0.4
+  diag-3      192.168.252.4    0.025           0.4
 
---- Round 4 ---
-  *** Trust drain event ***
-  Trust drain: diag-2 trust=0.15 (< min-trust 0.5) → expect diag-3 to win next rounds
+  → diag-1 recommends: e80cbdf42748 (diag-3, trust=0.80)
+    savings=0.010; trust-weighted=0.008
 
---- Round 5 ---
-  → diag-1 recommends: diag-3  (savings=0.580)
+  *** Round 3: Trust drain event ***
+  Trust drain applied: diag-2 (id=6fed3bd30c6e) trust=0.15 on diag-1
+
+  → Rounds 4–6: diag-1 continues to recommend diag-3 (diag-2 excluded: trust below floor)
 ```
 
 ### Quickstart
