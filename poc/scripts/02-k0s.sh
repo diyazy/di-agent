@@ -20,7 +20,7 @@ vm_ip() { multipass list | awk -v vm="$1" '$1 == vm {print $3}'; }
 
 wait_k0s_ready() {
     local vm="$1"
-    local timeout=120
+    local timeout=300
     local elapsed=0
     info "Waiting for k0s node to reach Ready on $vm (timeout=${timeout}s) ..."
     while [ "$elapsed" -lt "$timeout" ]; do

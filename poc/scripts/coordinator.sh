@@ -70,21 +70,33 @@ ROUNDS="${ROUNDS:-8}"
 INTERVAL="${INTERVAL:-10}"
 DRAIN_ROUND=$(( ROUNDS / 2 ))   # halfway point: drain diag-2's trust on diag-1
 
-# ── discover IPs ─────────────────────────────────────────────────────────────
-declare -A IPS
-for vm in "${VMS[@]}"; do
-    ip=$(vm_ip "$vm")
+# ── discover IPs (bash 3.x compat — no associative arrays) ──────────────────
+IP1=$(vm_ip "${VMS[0]}")
+IP2=$(vm_ip "${VMS[1]}")
+IP3=$(vm_ip "${VMS[2]}")
+
+for i in 1 2 3; do
+    vm="${VMS[$((i-1))]}"
+    eval "ip=\$IP$i"
     if [ -z "$ip" ]; then
         err "Could not find IP for $vm — is it running?"
         exit 1
     fi
-    IPS["$vm"]="$ip"
 done
 
+# Helper: get IP for a VM by position in VMS array
+ip_for() {
+    case "$1" in
+        "${VMS[0]}") echo "$IP1" ;;
+        "${VMS[1]}") echo "$IP2" ;;
+        "${VMS[2]}") echo "$IP3" ;;
+    esac
+}
+
 info "VM map:"
-for vm in "${VMS[@]}"; do
-    echo "  $vm  →  ${IPS[$vm]}"
-done
+echo "  ${VMS[0]}  →  $IP1"
+echo "  ${VMS[1]}  →  $IP2"
+echo "  ${VMS[2]}  →  $IP3"
 echo ""
 
 # ── main loop ─────────────────────────────────────────────────────────────────
@@ -96,22 +108,20 @@ for round in $(seq 1 "$ROUNDS"); do
     header "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     # ── 1. poll /cost on all agents ──────────────────────────────────────────
-    declare -A COSTS
-    declare -A CONFIDENCES
-
     printf "  %-10s  %-18s  %-14s  %-12s\n" "VM" "IP" "ResourceCost" "Confidence"
     printf "  %-10s  %-18s  %-14s  %-12s\n" "----------" "------------------" "--------------" "------------"
 
     COST_ARGS=()
-    for vm in "${VMS[@]}"; do
-        ip="${IPS[$vm]}"
-        raw=$(curl -sf "http://${ip}:8080/cost?taskType=pod-scheduling&nodeID=master" 2>/dev/null || echo "{}")
+    RC1="" RC2="" RC3=""
+    for i in 1 2 3; do
+        vm="${VMS[$((i-1))]}"
+        eval "ip=\$IP$i"
+        raw=$(curl -sf "http://${ip}:9090/cost?taskType=pod-scheduling&nodeID=master" 2>/dev/null || echo "{}")
         rc=$(json_get "$raw" "ResourceCost")
         conf=$(json_get "$raw" "Confidence")
         rc="${rc:-0.000}"
         conf="${conf:-0.000}"
-        COSTS["$vm"]="$rc"
-        CONFIDENCES["$vm"]="$conf"
+        eval "RC$i=$rc"
         COST_ARGS+=("$vm" "$rc")
         printf "  %-10s  %-18s  %-14s  %-12s\n" "$vm" "$ip" "$rc" "$conf"
     done
@@ -122,15 +132,15 @@ for round in $(seq 1 "$ROUNDS"); do
     info "Highest ResourceCost: $busiest_vm (cost=$busiest_cost)"
 
     # ── 3. call /recommend on the busiest agent ──────────────────────────────
-    busiest_ip="${IPS[$busiest_vm]}"
+    busiest_ip=$(ip_for "$busiest_vm")
     rec_raw=$(curl -sf -X POST \
         -H "Content-Type: application/json" \
         -d "{\"task_type\":\"pod-scheduling\",\"source_node_id\":\"master\"}" \
-        "http://${busiest_ip}:8080/recommend" 2>/dev/null || echo "{}")
+        "http://${busiest_ip}:9090/recommend" 2>/dev/null || echo "{}")
 
-    peer_id=$(json_get "$rec_raw" "peer_id")
-    savings=$(json_get "$rec_raw" "expected_savings")
-    rationale=$(json_get "$rec_raw" "rationale")
+    peer_id=$(json_get "$rec_raw" "PeerID")
+    savings=$(json_get "$rec_raw" "ExpectedSavings")
+    rationale=$(json_get "$rec_raw" "Rationale")
     error_msg=$(json_get "$rec_raw" "error")
 
     if [ -n "$error_msg" ]; then
@@ -150,25 +160,43 @@ for round in $(seq 1 "$ROUNDS"); do
 
     # ── 4. mid-point trust drain ──────────────────────────────────────────────
     if [ "$round" -eq "$DRAIN_ROUND" ] && [ "$DRAIN_DONE" = "false" ]; then
-        DRAIN_TARGET="${VMS[1]}"  # diag-2 (second VM)
-        DRAIN_HOST="${VMS[0]}"    # draining from diag-1 (first VM)
-        drain_ip="${IPS[$DRAIN_HOST]}"
+        DRAIN_TARGET_VM="${VMS[1]}"  # diag-2 (second VM)
+        DRAIN_HOST="${VMS[0]}"       # draining from diag-1 (first VM)
+        drain_ip=$(ip_for "$DRAIN_HOST")
+        drain_target_ip=$(ip_for "$DRAIN_TARGET_VM")
 
         header "  *** Trust drain event at round $round ***"
-        # Set absolute trust to 0.15 — below the default min-trust floor of 0.5
-        # so diag-1 stops recommending diag-2 and routes to diag-3 instead.
-        info "Setting trust for $DRAIN_TARGET on $DRAIN_HOST to 0.15 (below min-trust floor) ..."
-        drain_resp=$(curl -sf -X POST \
-            -H "Content-Type: application/json" \
-            -d '{"value": 0.15}' \
-            "http://${drain_ip}:8080/peers/${DRAIN_TARGET}/trust" 2>/dev/null || echo "{}")
-        drain_err=$(json_get "$drain_resp" "error")
-        if [ -n "$drain_err" ] && [ "$drain_err" != "null" ] && [ "$drain_err" != "" ]; then
-            err "  Trust drain failed: $drain_err"
+        # Peer IDs are sha256(url)[:12] — look up the real ID on diag-1 by
+        # matching the URL that points to diag-2.
+        peers_raw=$(curl -sf "http://${drain_ip}:9090/peers" 2>/dev/null || echo "[]")
+        drain_peer_id=$(echo "$peers_raw" | python3 -c "
+import sys, json
+peers = json.load(sys.stdin)
+target_url = 'http://${drain_target_ip}:9090'
+for p in peers:
+    if p.get('url','').rstrip('/') == target_url.rstrip('/'):
+        print(p['id'])
+        break
+" 2>/dev/null || echo "")
+
+        if [ -z "$drain_peer_id" ]; then
+            err "  Could not find peer ID for $DRAIN_TARGET_VM on $DRAIN_HOST — skipping drain"
         else
-            ok "  Trust drain applied: $DRAIN_TARGET trust set to 0.15 on $DRAIN_HOST"
+            # Set absolute trust to 0.15 — below the default min-trust floor of 0.5
+            # so diag-1 stops recommending diag-2 and routes to diag-3 instead.
+            info "Setting trust for $DRAIN_TARGET_VM (id=$drain_peer_id) on $DRAIN_HOST to 0.15 ..."
+            drain_resp=$(curl -sf -X POST \
+                -H "Content-Type: application/json" \
+                -d '{"value": 0.15}' \
+                "http://${drain_ip}:9090/peers/${drain_peer_id}/trust" 2>/dev/null || echo "{}")
+            drain_err=$(json_get "$drain_resp" "error")
+            if [ -n "$drain_err" ] && [ "$drain_err" != "null" ] && [ "$drain_err" != "" ]; then
+                err "  Trust drain failed: $drain_err"
+            else
+                ok "  Trust drain applied: $DRAIN_TARGET_VM (id=$drain_peer_id) trust=0.15 on $DRAIN_HOST"
+            fi
+            announce "Trust drain: $DRAIN_TARGET_VM trust=0.15 (< min-trust 0.5) → expect ${VMS[2]} to win next rounds"
         fi
-        announce "Trust drain: $DRAIN_TARGET trust=0.15 (< min-trust 0.5) → expect ${VMS[2]} to win next rounds"
         echo ""
         DRAIN_DONE=true
     fi

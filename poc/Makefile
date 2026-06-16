@@ -53,7 +53,7 @@ status:
 			continue; \
 		fi; \
 		echo "--- $$vm ($$ip) ---"; \
-		curl -sf "http://$$ip:8080/cost?taskType=pod-scheduling&nodeID=master" | \
+		curl -sf "http://$$ip:9090/cost?taskType=pod-scheduling&nodeID=master" | \
 			python3 -c "import sys,json; d=json.load(sys.stdin); \
 			print('  ResourceCost={ResourceCost:.4f}  Confidence={Confidence:.4f}'.format(**d))" \
 			2>/dev/null || echo "  (agent not responding)"; \

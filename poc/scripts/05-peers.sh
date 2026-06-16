@@ -26,20 +26,36 @@ vm_ip() { multipass list | awk -v vm="$1" '$1 == vm {print $3}'; }
 register_peer() {
     local target_vm="$1"   # VM whose agent receives the POST
     local target_ip="$2"   # IP of target_vm
-    local peer_id="$3"     # ID of the peer being registered
+    local peer_id="$3"     # human label (unused by server — kept for log readability)
     local peer_url="$4"    # URL of the peer
     local trust="${5:-0.8}"
 
     info "  $target_vm ← peer $peer_id ($peer_url, trust=$trust)"
-    local response
-    response=$(curl -sf -X POST \
+    # POST /peers only takes url+note; server derives ID from sha256(url) and
+    # starts trust at 0.5.  We must follow up with POST /peers/{id}/trust.
+    local add_resp
+    add_resp=$(curl -sf -X POST \
         -H "Content-Type: application/json" \
-        -d "{\"id\": \"${peer_id}\", \"url\": \"${peer_url}\", \"trust\": ${trust}}" \
-        "http://${target_ip}:8080/peers" 2>&1) || {
-        err "  Failed to POST /peers on $target_vm ($target_ip): $response"
+        -d "{\"url\": \"${peer_url}\"}" \
+        "http://${target_ip}:9090/peers" 2>&1) || {
+        err "  Failed to POST /peers on $target_vm ($target_ip): $add_resp"
         return 1
     }
-    ok "  registered"
+    local derived_id
+    derived_id=$(echo "$add_resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null || echo "")
+    if [ -z "$derived_id" ]; then
+        err "  Could not extract peer ID from response on $target_vm: $add_resp"
+        return 1
+    fi
+    # Set the initial trust explicitly.
+    curl -sf -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"value\": ${trust}}" \
+        "http://${target_ip}:9090/peers/${derived_id}/trust" >/dev/null 2>&1 || {
+        err "  Failed to set trust for $derived_id on $target_vm"
+        return 1
+    }
+    ok "  registered (id=$derived_id, trust=$trust)"
 }
 
 # ── args ─────────────────────────────────────────────────────────────────────
@@ -49,42 +65,43 @@ else
     VMS=("$@")
 fi
 
-# ── discover IPs ─────────────────────────────────────────────────────────────
-declare -A IPS
-for vm in "${VMS[@]}"; do
-    ip=$(vm_ip "$vm")
+# ── discover IPs (no associative arrays — bash 3.x compat) ──────────────────
+IP1=$(vm_ip "${VMS[0]}")
+IP2=$(vm_ip "${VMS[1]}")
+IP3=$(vm_ip "${VMS[2]}")
+
+for i in 1 2 3; do
+    vm="${VMS[$((i-1))]}"
+    eval "ip=\$IP$i"
     if [ -z "$ip" ]; then
         err "Could not find IP for $vm — is it running?"
         exit 1
     fi
-    IPS["$vm"]="$ip"
-    info "$vm → ${IPS[$vm]}"
+    info "$vm → $ip"
 done
 
 # ── register peers ────────────────────────────────────────────────────────────
 info ""
 info "Registering peer relationships ..."
 
-for target in "${VMS[@]}"; do
-    target_ip="${IPS[$target]}"
-    for peer in "${VMS[@]}"; do
-        if [ "$peer" = "$target" ]; then
-            continue
-        fi
-        peer_ip="${IPS[$peer]}"
-        register_peer "$target" "$target_ip" "$peer" "http://${peer_ip}:8080" 0.8
-    done
-done
+register_peer "${VMS[0]}" "$IP1" "${VMS[1]}" "http://${IP2}:9090" 0.8
+register_peer "${VMS[0]}" "$IP1" "${VMS[2]}" "http://${IP3}:9090" 0.8
+
+register_peer "${VMS[1]}" "$IP2" "${VMS[0]}" "http://${IP1}:9090" 0.8
+register_peer "${VMS[1]}" "$IP2" "${VMS[2]}" "http://${IP3}:9090" 0.8
+
+register_peer "${VMS[2]}" "$IP3" "${VMS[0]}" "http://${IP1}:9090" 0.8
+register_peer "${VMS[2]}" "$IP3" "${VMS[1]}" "http://${IP2}:9090" 0.8
 
 # ── verify ────────────────────────────────────────────────────────────────────
 info ""
 info "Verifying peer lists ..."
-for vm in "${VMS[@]}"; do
-    ip="${IPS[$vm]}"
-    peer_count=$(curl -sf "http://${ip}:8080/peers" 2>/dev/null \
+for ip in "$IP1" "$IP2" "$IP3"; do
+    vm="${VMS[$(( $(echo "$IP1 $IP2 $IP3" | tr ' ' '\n' | grep -n "^${ip}$" | cut -d: -f1) - 1 ))]}"
+    peer_count=$(curl -sf "http://${ip}:9090/peers" 2>/dev/null \
         | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d))" 2>/dev/null \
         || echo "?")
-    ok "$vm: $peer_count peers registered"
+    ok "$ip: $peer_count peers registered"
 done
 
 echo ""

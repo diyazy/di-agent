@@ -88,8 +88,8 @@ ENVEOF
     local_attempts=0
     while [ "$local_attempts" -lt 12 ]; do
         if multipass exec "$vm" -- bash -c \
-            "curl -sf http://localhost:8080/healthz > /dev/null 2>&1"; then
-            ok "$vm: di-agent healthy at localhost:8080"
+            "curl -sf http://localhost:9090/healthz > /dev/null 2>&1"; then
+            ok "$vm: di-agent healthy at localhost:9090"
             break
         fi
         sleep 5
